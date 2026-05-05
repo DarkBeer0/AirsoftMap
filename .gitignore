@@ -68,6 +68,7 @@ mobile/ios/Runner/GeneratedPluginRegistrant.*
 !.env.example
 *.pem
 *.key
+mobile/lib/core/config/supabase_config.dart
 
 # === Map packs (большие MBTiles) ===
 *.mbtiles

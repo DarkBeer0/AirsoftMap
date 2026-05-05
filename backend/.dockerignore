@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.md
+bin/
+tmp/
+.idea/
+.vscode/
+.claude/
