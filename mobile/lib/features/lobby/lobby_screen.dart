@@ -1,7 +1,11 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+
+import '../../core/api/games_api.dart';
+import '../../core/auth/auth_provider.dart';
 
 class LobbyScreen extends ConsumerStatefulWidget {
   const LobbyScreen({super.key});
@@ -12,6 +16,7 @@ class LobbyScreen extends ConsumerStatefulWidget {
 
 class _LobbyScreenState extends ConsumerState<LobbyScreen> {
   bool _scanning = false;
+  bool _joining = false;
 
   @override
   Widget build(BuildContext context) {
@@ -34,7 +39,7 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
               ),
               const SizedBox(height: 16),
               FilledButton.tonal(
-                onPressed: () => context.go('/create'),
+                onPressed: _joining ? null : () => context.go('/create'),
                 child: const Padding(
                   padding: EdgeInsets.symmetric(vertical: 12),
                   child: Text('Создать игру', style: TextStyle(fontSize: 18)),
@@ -48,6 +53,9 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
   }
 
   Widget _buildIdle() {
+    if (_joining) {
+      return const Center(child: CircularProgressIndicator());
+    }
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -90,12 +98,12 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
     final code = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Код игры'),
+        title: const Text('Код стороны'),
         content: TextField(
           controller: controller,
           autofocus: true,
           textCapitalization: TextCapitalization.characters,
-          decoration: const InputDecoration(hintText: 'XXXXXX'),
+          decoration: const InputDecoration(hintText: 'XXXXX'),
         ),
         actions: [
           TextButton(
@@ -112,11 +120,42 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
     if (code != null && code.isNotEmpty) _onJoinCode(code);
   }
 
-  void _onJoinCode(String code) {
-    setState(() => _scanning = false);
-    // TODO: POST /games/join → загрузка map-pack → push /command
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('TODO: join $code')),
-    );
+  Future<void> _onJoinCode(String code) async {
+    if (_joining) return; // защита от двойного срабатывания сканера
+    setState(() {
+      _scanning = false;
+      _joining = true;
+    });
+
+    final messenger = ScaffoldMessenger.of(context);
+    final router = GoRouter.of(context);
+
+    try {
+      // 1. Гарантируем анонимную Supabase-сессию → JWT для нашего API.
+      await ref.read(authServiceProvider).ensureSignedIn();
+
+      // 2. POST /games/join.
+      final result = await ref.read(gamesApiProvider).joinBySideCode(code);
+
+      messenger.showSnackBar(SnackBar(
+        content: Text(
+          'Подключено: ${result.gameName} / ${result.sideName} · ${result.callsign}',
+        ),
+      ));
+
+      // TODO (фаза 2): фоновое скачивание map-pack из result.mapPackUrl.
+      router.go('/battle');
+    } on DioException catch (e) {
+      final msg = switch (e.response?.statusCode) {
+        404 => 'Неверный код',
+        401 => 'Ошибка авторизации',
+        _ => 'Ошибка соединения: ${e.message ?? e.type.name}',
+      };
+      messenger.showSnackBar(SnackBar(content: Text(msg)));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+    } finally {
+      if (mounted) setState(() => _joining = false);
+    }
   }
 }

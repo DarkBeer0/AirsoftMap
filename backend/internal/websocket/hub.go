@@ -111,8 +111,11 @@ func (h *Hub) Serve(ctx context.Context, conn *websocket.Conn, userID, gameID st
 }
 
 func (h *Hub) dispatch(p Packet) {
+	db := h.members.DB()
 	// Получаем автора пакета (для фильтрации по стороне/отряду).
-	author, _ := h.members.ByUserAndGame(p.Author, p.GameID)
+	// TODO (фаза 3): кэшировать members в памяти — сейчас на каждый пакет идёт
+	// SELECT для каждого получателя, на ~50 клиентах это положит БД.
+	author, _ := h.members.ByUserAndGame(db, p.Author, p.GameID)
 	if author == nil {
 		return
 	}
@@ -123,7 +126,7 @@ func (h *Hub) dispatch(p Packet) {
 		if c.GameID != p.GameID || uid == p.Author {
 			continue
 		}
-		receiver, _ := h.members.ByUserAndGame(uid, p.GameID)
+		receiver, _ := h.members.ByUserAndGame(db, uid, p.GameID)
 		if !canReceive(receiver, author, p) {
 			continue
 		}

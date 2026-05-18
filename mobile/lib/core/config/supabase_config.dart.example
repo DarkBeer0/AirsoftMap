@@ -1,0 +1,16 @@
+// Скопируй в supabase_config.dart и подставь свои значения.
+// supabase_config.dart в .gitignore — секреты не коммитим.
+
+class SupabaseConfig {
+  static const String url = '<your-supabase-url>';
+  static const String anonKey = '<your-anon-key>';
+
+  // Базовый URL Go-API.
+  //   Android-эмулятор: host доступен как 10.0.2.2
+  //   iOS-симулятор:    localhost / 127.0.0.1
+  //   Реальное устройство: IP машины в локальной сети
+  static const String apiBaseUrl = 'http://10.0.2.2:8080';
+
+  // WebSocket-эндпоинт того же сервиса. ws:// (не wss://) для локального dev.
+  static const String wsBaseUrl = 'ws://10.0.2.2:8080';
+}

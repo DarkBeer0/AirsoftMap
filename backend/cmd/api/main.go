@@ -35,12 +35,13 @@ func main() {
 
 	// Repos
 	gamesRepo := repository.NewGamesRepo(db)
+	sidesRepo := repository.NewSidesRepo(db)
 	membersRepo := repository.NewMembersRepo(db)
 	markersRepo := repository.NewMarkersRepo(db)
 	eventsRepo := repository.NewEventsRepo(db)
 
 	// Services
-	gameSvc := service.NewGameService(gamesRepo, membersRepo)
+	gameSvc := service.NewGameService(gamesRepo, sidesRepo, membersRepo)
 	markerSvc := service.NewMarkerService(markersRepo, membersRepo)
 	eventSvc := service.NewEventService(eventsRepo, membersRepo)
 
@@ -63,14 +64,14 @@ func main() {
 
 	api := r.Group("/api/v1")
 
-	// Public
-	api.POST("/games/join", gameH.Join)
-
-	// Protected
+	// Join — защищённый, даже если игрок входит впервые. Supabase anonymous-сессия
+	// выдаст JWT → у нас стабильный user_id, чтобы re-join после потери связи не
+	// плодил дубли в game_members.
 	auth := middleware.JWTAuth(jwtSecret, jwksURL)
 	priv := api.Group("", auth)
 	{
 		priv.POST("/games", gameH.Create)
+		priv.POST("/games/join", gameH.Join)
 		priv.PATCH("/games/:id", gameH.Update)
 		priv.POST("/games/:id/map-pack", gameH.SetMapPack)
 		priv.POST("/games/:id/qr", gameH.GenerateQR)
