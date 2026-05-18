@@ -6,7 +6,22 @@
 
 ## Текущий статус
 
-**Фаза 0 — проектирование (этот документ).** Кода пока нет.
+**Фаза 1 — каркас + одиночный flow, в работе.**
+
+Что уже работает end-to-end:
+
+- **Backend** компилируется и проходит `go vet` (`backend/`):
+  - 4 миграции (games / sides / spawn_points / squads / game_members / markers / events + триггер `auth.users → profiles`)
+  - `POST /api/v1/games` — атомарное создание игры + сторон + organizer-member в транзакции, генерация уникальных кодов (читаемый алфавит без `O/0/I/1/L`)
+  - `POST /api/v1/games/join` — вход по коду стороны, идемпотентный upsert участника (повторный join сохраняет role/status)
+  - `GET /api/v1/games/:id/members` — список с фильтром по правам: organizer / side_commander видят всех, остальные — только свою сторону, не-член получает 403
+  - JWT-валидация (HS256) на всех защищённых эндпоинтах
+- **Mobile** (требует локально `flutter pub get` + `dart run build_runner build` + `supabase_config.dart`):
+  - Лобби с QR-сканером и ручным вводом кода → анонимная сессия Supabase → реальный `POST /games/join` → сессия сохраняется в Riverpod-провайдере → переход на боевую карту
+  - Боевая карта: MapLibre с raster-источником OpenTopoMap, нативный GPS-маркер с трекингом и компасом, плашка стороны/позывного/роли, атрибуция CC-BY-SA, кнопка «УБИТ»
+  - GPS-разрешения запрашиваются с retry-баннером при отказе
+
+Открытые риски (план Фазы 3 и далее): WS-хаб дёргает БД на каждый пакет (B1), нет foreground-сервиса для GPS (C7), валидация координат внутри bbox (D1) — см. также рекурсивный анализ в истории планов.
 
 ---
 
@@ -278,15 +293,15 @@ airsoftmap/
 
 ### Фаза 1 — Каркас + одиночный flow (MVP организатора)
 
-- [ ] Flutter-проект, Riverpod, базовая навигация (Lobby / Create / Battle)
-- [ ] Supabase Auth (анонимные сессии)
-- [ ] Drift схемы (games, members, markers, events, tiles)
-- [ ] MapLibre + онлайн OpenTopoMap (без оффлайна)
+- [x] Flutter-проект, Riverpod, базовая навигация (Lobby / Create / Battle)
+- [x] Supabase Auth (анонимные сессии)
+- [x] Drift схемы (games, markers, events) — *локально требует `dart run build_runner build` для `database.g.dart`*
+- [x] MapLibre + онлайн OpenTopoMap (без оффлайна)
 - [ ] Экран создания игры: bbox на карте → загрузка тайлов → MBTiles
-- [ ] `shelf`-сервер на localhost для отдачи MBTiles
+- [x] `shelf`-сервер на localhost для отдачи MBTiles *(код готов в `core/map/`, ещё не подключён к battle_map)*
 - [ ] Переключение MapLibre на локальный источник
-- [ ] Go-бэкенд: миграции, модели games/members
-- [ ] Эндпоинты создания/получения игры
+- [x] Go-бэкенд: миграции (4 шт) + модели games/sides/members/markers/events
+- [x] Эндпоинты создания/получения игры: `POST /games`, `POST /games/join`, `GET /games/:id/members`
 - [ ] Загрузка MBTiles в Supabase Storage
 
 ### Фаза 2 — Лобби, QR, распределение

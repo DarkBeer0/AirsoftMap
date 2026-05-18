@@ -16,6 +16,7 @@ import (
 var (
 	ErrInvalidJoinCode = errors.New("invalid join code")
 	ErrGameNotFound    = errors.New("game not found")
+	ErrForbidden       = errors.New("forbidden")
 	ErrValidation      = errors.New("validation")
 )
 
@@ -202,6 +203,47 @@ func (s *GameService) JoinBySideCode(ctx context.Context, userID, sideCode, call
 		return nil, err
 	}
 	return &JoinResult{Game: *game, Side: *side, Member: *actual}, nil
+}
+
+// ListMembers — список участников игры с учётом прав:
+//   - organizer / side_commander → видят всех;
+//   - squad_leader / soldier      → только свою сторону (включая себя).
+//
+// Если запрашивающий не член игры — ErrForbidden (а не 404, чтобы не палить
+// существование игры по чужому id).
+func (s *GameService) ListMembers(ctx context.Context, userID, gameID string) ([]model.GameMember, error) {
+	if gameID == "" || userID == "" {
+		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
+	}
+	db := s.games.DB()
+
+	self, err := s.members.ByUserAndGame(db, userID, gameID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrForbidden
+		}
+		return nil, err
+	}
+
+	all, err := s.members.ListByGame(db, gameID)
+	if err != nil {
+		return nil, err
+	}
+
+	if self.Role == model.RoleOrganizer || self.Role == model.RoleSideCommander {
+		return all, nil
+	}
+	if self.SideID == nil {
+		// Игрок ещё не на стороне — видит только себя.
+		return []model.GameMember{*self}, nil
+	}
+	out := make([]model.GameMember, 0, len(all))
+	for _, m := range all {
+		if m.SideID != nil && *m.SideID == *self.SideID {
+			out = append(out, m)
+		}
+	}
+	return out, nil
 }
 
 // uniqueCode — пытается N раз сгенерировать уникальный код в указанной колонке.

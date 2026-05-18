@@ -6,6 +6,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../core/api/games_api.dart';
 import '../../core/auth/auth_provider.dart';
+import '../../core/session/game_session.dart';
 
 class LobbyScreen extends ConsumerStatefulWidget {
   const LobbyScreen({super.key});
@@ -136,6 +137,9 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
 
       // 2. POST /games/join.
       final result = await ref.read(gamesApiProvider).joinBySideCode(code);
+
+      // 3. Сохраняем сессию — её прочитают battle_map / ws / kill_state.
+      ref.read(gameSessionProvider.notifier).set(result);
 
       messenger.showSnackBar(SnackBar(
         content: Text(
