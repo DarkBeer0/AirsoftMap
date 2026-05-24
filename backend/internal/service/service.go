@@ -54,11 +54,17 @@ type JoinResult struct {
 type GameService struct {
 	games   *repository.GamesRepo
 	sides   *repository.SidesRepo
+	squads  *repository.SquadsRepo
 	members *repository.MembersRepo
 }
 
-func NewGameService(g *repository.GamesRepo, s *repository.SidesRepo, m *repository.MembersRepo) *GameService {
-	return &GameService{games: g, sides: s, members: m}
+func NewGameService(
+	g *repository.GamesRepo,
+	s *repository.SidesRepo,
+	sq *repository.SquadsRepo,
+	m *repository.MembersRepo,
+) *GameService {
+	return &GameService{games: g, sides: s, squads: sq, members: m}
 }
 
 // Create — игра + стороны + organizer-member, всё в одной транзакции.
@@ -278,6 +284,210 @@ func (s *GameService) ListMembers(ctx context.Context, userID, gameID string) ([
 		}
 	}
 	return out, nil
+}
+
+// ─── Sides / Squads / Member assignment ────────────────────────────────────
+
+// ListSides — доступно любому члену игры; для не-членов 403 (а не 404,
+// чтобы не палить существование игры по id).
+func (s *GameService) ListSides(ctx context.Context, userID, gameID string) ([]model.Side, error) {
+	if gameID == "" || userID == "" {
+		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
+	}
+	db := s.games.DB()
+	if _, err := s.requireMember(db, userID, gameID); err != nil {
+		return nil, err
+	}
+	return s.sides.ListByGame(db, gameID)
+}
+
+// ListSquads — все отряды всех сторон игры. Доступно любому члену.
+// Фильтрацию по стороне делает клиент (организатор видит всё).
+func (s *GameService) ListSquads(ctx context.Context, userID, gameID string) ([]model.Squad, error) {
+	if gameID == "" || userID == "" {
+		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
+	}
+	db := s.games.DB()
+	if _, err := s.requireMember(db, userID, gameID); err != nil {
+		return nil, err
+	}
+	return s.squads.ListByGame(db, gameID)
+}
+
+type CreateSquadInput struct {
+	UserID string
+	GameID string
+	SideID string
+	Name   string
+}
+
+// CreateSquad — organizer может создать в любой стороне; side_commander —
+// только в своей. Squad_leader/soldier — нет.
+func (s *GameService) CreateSquad(ctx context.Context, in CreateSquadInput) (*model.Squad, error) {
+	if strings.TrimSpace(in.Name) == "" || in.SideID == "" {
+		return nil, fmt.Errorf("%w: name and side required", ErrValidation)
+	}
+	db := s.games.DB()
+	caller, err := s.requireMember(db, in.UserID, in.GameID)
+	if err != nil {
+		return nil, err
+	}
+	side, err := s.sideInGame(db, in.SideID, in.GameID)
+	if err != nil {
+		return nil, err
+	}
+	if !canManageSide(caller, side) {
+		return nil, ErrForbidden
+	}
+	sq := &model.Squad{
+		ID:     uuid.NewString(),
+		SideID: in.SideID,
+		Name:   strings.TrimSpace(in.Name),
+	}
+	if err := s.squads.Insert(db, sq); err != nil {
+		return nil, err
+	}
+	return sq, nil
+}
+
+type UpdateMemberInput struct {
+	CallerID string
+	GameID   string
+	MemberID string
+
+	// Все опциональные — обновляются только переданные поля.
+	SideID   *string
+	SquadID  *string
+	Role     *string
+	Callsign *string
+}
+
+// UpdateMember — назначение стороны/отряда/роли/позывного.
+//
+// Правила:
+//   - organizer: может всё, кроме понижения себя.
+//   - side_commander: только члены его стороны; нельзя выдать organizer-роль;
+//     нельзя перевести бойца в другую сторону (это решает organizer).
+//   - остальные роли — 403.
+//
+// Если назначается squad_id — проверяем, что отряд принадлежит стороне,
+// в которой числится (или будет числиться) член.
+func (s *GameService) UpdateMember(ctx context.Context, in UpdateMemberInput) (*model.GameMember, error) {
+	if in.GameID == "" || in.MemberID == "" {
+		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
+	}
+	db := s.games.DB()
+	caller, err := s.requireMember(db, in.CallerID, in.GameID)
+	if err != nil {
+		return nil, err
+	}
+
+	target, err := s.members.ByID(db, in.MemberID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrForbidden
+		}
+		return nil, err
+	}
+	if target.GameID != in.GameID {
+		return nil, ErrForbidden
+	}
+
+	if err := s.authorizeMemberUpdate(caller, target, in); err != nil {
+		return nil, err
+	}
+
+	// Если назначается squad — он должен принадлежать целевой стороне.
+	if in.SquadID != nil && *in.SquadID != "" {
+		sq, err := s.squads.ByID(db, *in.SquadID)
+		if err != nil {
+			return nil, fmt.Errorf("%w: squad not found", ErrValidation)
+		}
+		// Сторона, в которой член будет числиться после апдейта.
+		effectiveSide := target.SideID
+		if in.SideID != nil {
+			effectiveSide = in.SideID
+		}
+		if effectiveSide == nil || sq.SideID != *effectiveSide {
+			return nil, fmt.Errorf("%w: squad belongs to different side", ErrValidation)
+		}
+	}
+
+	if err := s.members.UpdateAssignment(
+		db, in.MemberID,
+		in.SideID, in.SquadID, in.Role, in.Callsign,
+	); err != nil {
+		return nil, err
+	}
+	return s.members.ByID(db, in.MemberID)
+}
+
+func (s *GameService) authorizeMemberUpdate(
+	caller, target *model.GameMember,
+	in UpdateMemberInput,
+) error {
+	// Запрещено понижать самого себя (защита от случайного «развыдачи» organizer'а).
+	if caller.UserID == target.UserID && in.Role != nil && *in.Role != string(caller.Role) {
+		return fmt.Errorf("%w: cannot change own role", ErrForbidden)
+	}
+
+	switch caller.Role {
+	case model.RoleOrganizer:
+		return nil
+	case model.RoleSideCommander:
+		// Только своя сторона; нельзя выдавать organizer; нельзя менять сторону.
+		if caller.SideID == nil || target.SideID == nil || *caller.SideID != *target.SideID {
+			return ErrForbidden
+		}
+		if in.SideID != nil && (target.SideID == nil || *in.SideID != *target.SideID) {
+			return ErrForbidden
+		}
+		if in.Role != nil && *in.Role == string(model.RoleOrganizer) {
+			return ErrForbidden
+		}
+		return nil
+	default:
+		return ErrForbidden
+	}
+}
+
+func (s *GameService) requireMember(
+	q repository.Querier, userID, gameID string,
+) (*model.GameMember, error) {
+	m, err := s.members.ByUserAndGame(q, userID, gameID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrForbidden
+		}
+		return nil, err
+	}
+	return m, nil
+}
+
+func (s *GameService) sideInGame(
+	q repository.Querier, sideID, gameID string,
+) (*model.Side, error) {
+	sides, err := s.sides.ListByGame(q, gameID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range sides {
+		if sides[i].ID == sideID {
+			return &sides[i], nil
+		}
+	}
+	return nil, fmt.Errorf("%w: side not in game", ErrValidation)
+}
+
+func canManageSide(caller *model.GameMember, side *model.Side) bool {
+	if caller.Role == model.RoleOrganizer {
+		return true
+	}
+	if caller.Role == model.RoleSideCommander &&
+		caller.SideID != nil && *caller.SideID == side.ID {
+		return true
+	}
+	return false
 }
 
 // uniqueCode — пытается N раз сгенерировать уникальный код в указанной колонке.

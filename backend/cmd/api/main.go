@@ -36,12 +36,13 @@ func main() {
 	// Repos
 	gamesRepo := repository.NewGamesRepo(db)
 	sidesRepo := repository.NewSidesRepo(db)
+	squadsRepo := repository.NewSquadsRepo(db)
 	membersRepo := repository.NewMembersRepo(db)
 	markersRepo := repository.NewMarkersRepo(db)
 	eventsRepo := repository.NewEventsRepo(db)
 
 	// Services
-	gameSvc := service.NewGameService(gamesRepo, sidesRepo, membersRepo)
+	gameSvc := service.NewGameService(gamesRepo, sidesRepo, squadsRepo, membersRepo)
 	markerSvc := service.NewMarkerService(markersRepo, membersRepo)
 	eventSvc := service.NewEventService(eventsRepo, membersRepo)
 
@@ -51,6 +52,8 @@ func main() {
 
 	// Handlers
 	gameH := handler.NewGameHandler(gameSvc)
+	sideH := handler.NewSideHandler(gameSvc)
+	squadH := handler.NewSquadHandler(gameSvc)
 	memberH := handler.NewMemberHandler(gameSvc)
 	markerH := handler.NewMarkerHandler(markerSvc)
 	eventH := handler.NewEventHandler(eventSvc)
@@ -75,6 +78,9 @@ func main() {
 		priv.PATCH("/games/:id", gameH.Update)
 		priv.POST("/games/:id/map-pack", gameH.SetMapPack)
 		priv.POST("/games/:id/qr", gameH.GenerateQR)
+		priv.GET("/games/:id/sides", sideH.List)
+		priv.GET("/games/:id/squads", squadH.List)
+		priv.POST("/games/:id/squads", squadH.Create)
 		priv.GET("/games/:id/members", memberH.List)
 		priv.PATCH("/games/:id/members/:uid", memberH.Update)
 		priv.POST("/games/:id/markers", markerH.Create)

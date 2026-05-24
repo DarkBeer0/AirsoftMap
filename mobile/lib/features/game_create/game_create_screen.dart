@@ -576,6 +576,15 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
           ),
         ),
         const SizedBox(height: 8),
+        OutlinedButton.icon(
+          onPressed: () => context.go('/command'),
+          icon: const Icon(Icons.people_alt_outlined),
+          label: const Padding(
+            padding: EdgeInsets.symmetric(vertical: 10),
+            child: Text('Распределение'),
+          ),
+        ),
+        const SizedBox(height: 8),
         OutlinedButton(
           onPressed: () => context.go('/lobby'),
           child: const Padding(

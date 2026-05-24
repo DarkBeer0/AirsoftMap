@@ -1,14 +1,10 @@
-import 'dart:io';
-
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 
+import '../../core/map/map_pack_cache.dart';
 import '../../core/map/mbtiles_server.dart';
 import '../../core/session/game_session.dart';
 
@@ -76,7 +72,15 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
     }
 
     try {
-      final filePath = await _ensureMapPack(session.gameId, url);
+      final cache = ref.read(mapPackCacheProvider);
+      // Файл мог быть уже скачан lobby в фоне (или из game_create при создании
+      // организатором) — ensure() в обоих случаях возвращает существующий путь.
+      if (!await cache.existsFor(session.gameId) && mounted) {
+        setState(() => _statusMsg = 'Скачиваю карту полигона…');
+      }
+      final filePath = await cache.ensure(gameId: session.gameId, url: url);
+      if (mounted) setState(() => _statusMsg = null);
+
       final server = MbtilesServer();
       await server.start(filePath);
       _mbtilesServer = server;
@@ -96,33 +100,6 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
         });
       }
     }
-  }
-
-  Future<String> _ensureMapPack(String gameId, String url) async {
-    final docs = await getApplicationDocumentsDirectory();
-    final mapsDir = Directory(p.join(docs.path, 'maps'));
-    if (!mapsDir.existsSync()) mapsDir.createSync(recursive: true);
-    final filePath = p.join(mapsDir.path, '$gameId.mbtiles');
-    final file = File(filePath);
-    if (file.existsSync() && file.lengthSync() > 0) {
-      return filePath; // уже кэширован (организатор/повторный заход)
-    }
-    if (mounted) setState(() => _statusMsg = 'Скачиваю карту полигона…');
-    final dio = Dio(BaseOptions(
-      receiveTimeout: const Duration(minutes: 5),
-      connectTimeout: const Duration(seconds: 15),
-    ));
-    final res = await dio.get<List<int>>(
-      url,
-      options: Options(responseType: ResponseType.bytes),
-    );
-    final data = res.data;
-    if (data == null || data.isEmpty) {
-      throw Exception('пустой ответ Storage');
-    }
-    file.writeAsBytesSync(data, flush: true);
-    if (mounted) setState(() => _statusMsg = null);
-    return filePath;
   }
 
   Future<void> _requestLocation() async {
@@ -223,16 +200,34 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
           Positioned(
             right: 16,
             bottom: 32,
-            child: FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: Colors.red,
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
-              ),
-              onPressed: () => context.go('/dead'),
-              child: const Text(
-                'УБИТ',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (session != null &&
+                    (session.isOrganizer || session.role == 'side_commander'))
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: FloatingActionButton.small(
+                      heroTag: 'cmd',
+                      tooltip: 'Распределение',
+                      onPressed: () => context.go('/command'),
+                      child: const Icon(Icons.people_alt),
+                    ),
+                  ),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Colors.red,
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 18),
+                  ),
+                  onPressed: () => context.go('/dead'),
+                  child: const Text(
+                    'УБИТ',
+                    style:
+                        TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
             ),
           ),
         ],

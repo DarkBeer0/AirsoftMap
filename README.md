@@ -6,7 +6,7 @@
 
 ## Текущий статус
 
-**Фаза 1 завершена.** Полный flow: организатор создаёт игру → опционально скачивает топо-пачку полигона в MBTiles и заливает в Supabase Storage → раздаёт QR-коды сторон → бойцы сканируют → у всех (включая организатора) на боевой карте показывается локальная топо-карта и собственная позиция.
+**Фазы 1 и 2 завершены.** Полный flow: организатор создаёт игру → опционально скачивает топо-пачку полигона в MBTiles и заливает в Supabase Storage → раздаёт QR-коды сторон → бойцы сканируют → у всех (включая организатора) на боевой карте показывается локальная топо-карта и собственная позиция. Организатор и командиры сторон распределяют бойцов по отрядам через drag&drop, назначают роли.
 
 Что уже работает end-to-end:
 
@@ -16,6 +16,10 @@
   - `POST /api/v1/games/join` — вход по коду стороны, идемпотентный upsert (повторный join сохраняет role/status)
   - `GET /api/v1/games/:id/members` — список с фильтром по правам: organizer / side_commander видят всех, остальные — только свою сторону; не-член получает 403
   - `POST /api/v1/games/:id/map-pack` — записать URL Storage и (опц.) bbox; доступно только организатору
+  - `GET /api/v1/games/:id/sides` — список сторон (любой член игры)
+  - `GET /api/v1/games/:id/squads` — список отрядов всех сторон
+  - `POST /api/v1/games/:id/squads` — создать отряд (organizer / side_commander своей стороны)
+  - `PATCH /api/v1/games/:id/members/:uid` — назначение `side_id` / `squad_id` / `role` / `callsign` с проверкой прав: organizer — всё, кроме понижения себя; side_commander — только свою сторону, не может выдать `organizer`-роль; squad должен принадлежать целевой стороне
   - JWT-валидация (HS256) на всех защищённых эндпоинтах
 - **Mobile** (требует локально `flutter pub get` + `dart run build_runner build` + `supabase_config.dart` + Storage bucket `map-packs`):
   - Лобби с QR-сканером (deeplink `airsoftmap://join/<code>`) и ручным вводом → анонимная Supabase-сессия → `POST /games/join` → сохранение в Riverpod-сессии → переход на боевую карту
@@ -25,6 +29,8 @@
   - Боевая карта: динамический style (offline/online), нативный GPS-маркер с трекингом и компасом, плашка `сторона / позывной / роль` (organizer — серая точка + имя игры), атрибуция CC-BY-SA, кнопка «УБИТ»
   - GPS-разрешения запрашиваются с retry-баннером при отказе
   - `GameSession` (Riverpod) — единая доменная модель для soldier/organizer; `setMapPack` обновляет URL после upload
+  - Лобби после join делает фоновый prefetch map-pack через `MapPackCache` (общий для lobby/battle_map/game_create — идемпотентный `ensure(gameId, url)`)
+  - Командирский экран `/command`: tabs по сторонам (organizer видит все, side_commander — только свою), карточки отрядов как `DragTarget`, члены как `LongPressDraggable` chips с иконкой роли; tap → ModalBottomSheet с выбором новой роли; кнопка «+ Отряд»; auto-refresh после каждого изменения
 
 Открытые риски (Фаза 3+): WS-хаб дёргает БД на каждый пакет (B1), нет foreground-сервиса для GPS и shelf-сервера (C6/C7), валидация координат внутри bbox (D1), Kalman пока минимальный (C1) — см. рекурсивный анализ в истории планов.
 
@@ -312,12 +318,12 @@ airsoftmap/
 
 ### Фаза 2 — Лобби, QR, распределение
 
-- [ ] Сканер QR (`mobile_scanner`)
-- [ ] Генерация QR (`qr_flutter`)
-- [ ] Эндпоинт `/games/join` по коду
-- [ ] Фоновое скачивание map-pack из Storage сразу после join
-- [ ] Экран распределения (drag&drop, роли)
-- [ ] Командирский экран
+- [x] Сканер QR (`mobile_scanner`)
+- [x] Генерация QR (`qr_flutter`)
+- [x] Эндпоинт `/games/join` по коду
+- [x] Фоновое скачивание map-pack из Storage сразу после join
+- [x] Экран распределения (drag&drop, роли)
+- [x] Командирский экран (`/command` — tabs по сторонам, drag&drop в отряды)
 
 ### Фаза 3 — Боевая карта + real-time
 

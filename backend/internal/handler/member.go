@@ -72,7 +72,70 @@ func (h *MemberHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, listMembersResponse{Members: out})
 }
 
+type updateMemberRequest struct {
+	SideID   *string `json:"side_id,omitempty"`
+	SquadID  *string `json:"squad_id,omitempty"`
+	Role     *string `json:"role,omitempty"`     // organizer | side_commander | squad_leader | soldier
+	Callsign *string `json:"callsign,omitempty"`
+}
+
 func (h *MemberHandler) Update(c *gin.Context) {
-	// TODO (фаза 2): PATCH назначение отряда / роли. Только organizer / side_commander.
-	c.JSON(http.StatusNotImplemented, gin.H{"todo": "patch member"})
+	gameID := c.Param("id")
+	memberID := c.Param("uid")
+	userID := middleware.UserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "no user"})
+		return
+	}
+	var req updateMemberRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	// Пустые строки в squad/side трактуем как «снять назначение» (NULL).
+	// Сейчас COALESCE в repo не различает «не передано» и «явный NULL» —
+	// поэтому пустую строку чистим до nil → ничего не меняем.
+	// TODO (фаза 3): отдельная JSON-семантика null для unset.
+	normalizeEmpty(&req.SideID)
+	normalizeEmpty(&req.SquadID)
+	normalizeEmpty(&req.Role)
+	normalizeEmpty(&req.Callsign)
+
+	updated, err := h.svc.UpdateMember(c.Request.Context(), service.UpdateMemberInput{
+		CallerID: userID,
+		GameID:   gameID,
+		MemberID: memberID,
+		SideID:   req.SideID,
+		SquadID:  req.SquadID,
+		Role:     req.Role,
+		Callsign: req.Callsign,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrForbidden):
+			c.JSON(http.StatusForbidden, gin.H{"error": "no permission"})
+		case errors.Is(err, service.ErrValidation):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, memberDTO{
+		ID:       updated.ID,
+		UserID:   updated.UserID,
+		SideID:   updated.SideID,
+		SquadID:  updated.SquadID,
+		Callsign: updated.Callsign,
+		Role:     string(updated.Role),
+		Status:   string(updated.Status),
+		LastLng:  updated.LastLng,
+		LastLat:  updated.LastLat,
+	})
+}
+
+func normalizeEmpty(s **string) {
+	if *s != nil && **s == "" {
+		*s = nil
+	}
 }

@@ -82,6 +82,74 @@ class CreatedGame {
       );
 }
 
+/// DTO стороны (из GET /games/:id/sides).
+class SideInfo {
+  final String id;
+  final String name;
+  final String color;
+  final String? joinCode;
+  const SideInfo({
+    required this.id,
+    required this.name,
+    required this.color,
+    this.joinCode,
+  });
+  factory SideInfo.fromJson(Map<String, dynamic> j) => SideInfo(
+        id: j['id'] as String,
+        name: j['name'] as String,
+        color: j['color'] as String,
+        joinCode: j['join_code'] as String?,
+      );
+}
+
+/// DTO отряда.
+class SquadInfo {
+  final String id;
+  final String sideId;
+  final String name;
+  const SquadInfo({required this.id, required this.sideId, required this.name});
+  factory SquadInfo.fromJson(Map<String, dynamic> j) => SquadInfo(
+        id: j['id'] as String,
+        sideId: j['side_id'] as String,
+        name: j['name'] as String,
+      );
+}
+
+/// DTO члена игры (из GET /games/:id/members).
+class MemberInfo {
+  final String id;
+  final String userId;
+  final String? sideId;
+  final String? squadId;
+  final String callsign;
+  final String role; // organizer | side_commander | squad_leader | soldier
+  final String status; // alive | dead | respawning
+  final double? lastLng;
+  final double? lastLat;
+  const MemberInfo({
+    required this.id,
+    required this.userId,
+    required this.callsign,
+    required this.role,
+    required this.status,
+    this.sideId,
+    this.squadId,
+    this.lastLng,
+    this.lastLat,
+  });
+  factory MemberInfo.fromJson(Map<String, dynamic> j) => MemberInfo(
+        id: j['id'] as String,
+        userId: j['user_id'] as String,
+        sideId: j['side_id'] as String?,
+        squadId: j['squad_id'] as String?,
+        callsign: j['callsign'] as String,
+        role: j['role'] as String,
+        status: j['status'] as String,
+        lastLng: (j['last_lng'] as num?)?.toDouble(),
+        lastLat: (j['last_lat'] as num?)?.toDouble(),
+      );
+}
+
 class GamesApi {
   final Dio _dio;
   GamesApi(this._dio);
@@ -111,6 +179,57 @@ class GamesApi {
       if (callsign != null && callsign.isNotEmpty) 'callsign': callsign,
     });
     return JoinResult.fromJson(res.data as Map<String, dynamic>);
+  }
+
+  Future<List<SideInfo>> listSides(String gameId) async {
+    final res = await _dio.get('/games/$gameId/sides');
+    final raw = (res.data['sides'] as List).cast<Map<String, dynamic>>();
+    return raw.map(SideInfo.fromJson).toList(growable: false);
+  }
+
+  Future<List<SquadInfo>> listSquads(String gameId) async {
+    final res = await _dio.get('/games/$gameId/squads');
+    final raw = (res.data['squads'] as List).cast<Map<String, dynamic>>();
+    return raw.map(SquadInfo.fromJson).toList(growable: false);
+  }
+
+  Future<SquadInfo> createSquad(
+    String gameId, {
+    required String sideId,
+    required String name,
+  }) async {
+    final res = await _dio.post('/games/$gameId/squads', data: {
+      'side_id': sideId,
+      'name': name,
+    });
+    return SquadInfo.fromJson(res.data as Map<String, dynamic>);
+  }
+
+  Future<List<MemberInfo>> listMembers(String gameId) async {
+    final res = await _dio.get('/games/$gameId/members');
+    final raw = (res.data['members'] as List).cast<Map<String, dynamic>>();
+    return raw.map(MemberInfo.fromJson).toList(growable: false);
+  }
+
+  /// PATCH /games/:id/members/:uid. Все поля опциональны.
+  Future<MemberInfo> updateMember(
+    String gameId,
+    String memberId, {
+    String? sideId,
+    String? squadId,
+    String? role,
+    String? callsign,
+  }) async {
+    final res = await _dio.patch(
+      '/games/$gameId/members/$memberId',
+      data: {
+        if (sideId != null) 'side_id': sideId,
+        if (squadId != null) 'squad_id': squadId,
+        if (role != null) 'role': role,
+        if (callsign != null) 'callsign': callsign,
+      },
+    );
+    return MemberInfo.fromJson(res.data as Map<String, dynamic>);
   }
 
   /// PATCH-эквивалент: POST /games/:id/map-pack. Доступно только организатору.

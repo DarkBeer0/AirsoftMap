@@ -120,6 +120,48 @@ func (r *SidesRepo) ListByGame(q Querier, gameID string) ([]model.Side, error) {
 	return out, nil
 }
 
+// --- Squads ---
+
+type SquadsRepo struct{ db *sqlx.DB }
+
+func NewSquadsRepo(db *sqlx.DB) *SquadsRepo { return &SquadsRepo{db: db} }
+
+func (r *SquadsRepo) DB() *sqlx.DB { return r.db }
+
+func (r *SquadsRepo) Insert(q Querier, s *model.Squad) error {
+	_, err := q.NamedExec(`
+		INSERT INTO squads (id, side_id, name)
+		VALUES (:id, :side_id, :name)
+	`, s)
+	return err
+}
+
+func (r *SquadsRepo) ByID(q Querier, id string) (*model.Squad, error) {
+	var s model.Squad
+	if err := q.Get(&s, `SELECT * FROM squads WHERE id = $1`, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &s, nil
+}
+
+// ListByGame — все отряды всех сторон игры (с JOIN на sides для фильтра).
+func (r *SquadsRepo) ListByGame(q Querier, gameID string) ([]model.Squad, error) {
+	var out []model.Squad
+	err := q.Select(&out, `
+		SELECT sq.* FROM squads sq
+		JOIN sides s ON s.id = sq.side_id
+		WHERE s.game_id = $1
+		ORDER BY sq.name
+	`, gameID)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // --- Members ---
 
 type MembersRepo struct{ db *sqlx.DB }
@@ -164,8 +206,38 @@ func (r *MembersRepo) Upsert(q Querier, m *model.GameMember) error {
 	return err
 }
 
+func (r *MembersRepo) ByID(q Querier, id string) (*model.GameMember, error) {
+	var m model.GameMember
+	if err := q.Get(&m, `SELECT * FROM game_members WHERE id = $1`, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
 func (r *MembersRepo) UpdateStatus(q Querier, id string, status string) error {
 	_, err := q.Exec(`UPDATE game_members SET status = $1 WHERE id = $2`, status, id)
+	return err
+}
+
+// UpdateAssignment — изменить сторону / отряд / роль / позывной.
+// nil-поля сохраняют текущие значения (COALESCE).
+func (r *MembersRepo) UpdateAssignment(
+	q Querier,
+	id string,
+	sideID, squadID *string,
+	role, callsign *string,
+) error {
+	_, err := q.Exec(`
+		UPDATE game_members
+		SET side_id  = COALESCE($1, side_id),
+			squad_id = COALESCE($2, squad_id),
+			role     = COALESCE($3, role),
+			callsign = COALESCE($4, callsign)
+		WHERE id = $5
+	`, sideID, squadID, role, callsign, id)
 	return err
 }
 

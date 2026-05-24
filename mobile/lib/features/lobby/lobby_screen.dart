@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -6,6 +8,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../core/api/games_api.dart';
 import '../../core/auth/auth_provider.dart';
+import '../../core/map/map_pack_cache.dart';
 import '../../core/session/game_session.dart';
 
 class LobbyScreen extends ConsumerStatefulWidget {
@@ -150,7 +153,18 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
         ),
       ));
 
-      // TODO (фаза 2): фоновое скачивание map-pack из result.mapPackUrl.
+      // 4. Префетч map-pack в фоне (без await) — пока пользователь идёт на
+      // /battle, скачивание уже стартовало. battle_map увидит файл на диске.
+      final mapUrl = result.mapPackUrl;
+      if (mapUrl != null && mapUrl.isNotEmpty) {
+        unawaited(
+          ref.read(mapPackCacheProvider).ensure(
+                gameId: result.gameId,
+                url: mapUrl,
+              ),
+        );
+      }
+
       router.go('/battle');
     } on DioException catch (e) {
       final msg = switch (e.response?.statusCode) {
