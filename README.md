@@ -361,12 +361,18 @@ go run cmd/api/main.go
 
 ```bash
 cd mobile
-flutter create --org com.airsoftmap --project-name airsoftmap .  # один раз
 flutter pub get
-dart run build_runner build --delete-conflicting-outputs          # сгенерирует database.g.dart
+dart run build_runner build          # сгенерирует database.g.dart (он в .gitignore)
 cp lib/core/config/supabase_config.dart.example lib/core/config/supabase_config.dart
 # отредактировать supabase_config.dart с твоими ключами
 flutter run
+```
+
+Если нужно перегенерировать иконки и splash после изменения исходных PNG:
+
+```bash
+dart run flutter_launcher_icons
+dart run flutter_native_splash:create
 ```
 
 Дополнительно в Supabase:
@@ -375,7 +381,30 @@ flutter run
 - Storage → New bucket → **`map-packs`**, public = yes (иначе организатор не сможет залить .mbtiles)
 - Если миграция `004_profiles_trigger.up.sql` упала на правах — прогнать её через **SQL Editor** под ролью postgres
 
-На Android в `android/app/src/main/AndroidManifest.xml` нужны `ACCESS_FINE_LOCATION`, `INTERNET`; на iOS в `Info.plist` — `NSLocationWhenInUseUsageDescription` и `NSCameraUsageDescription` (для QR-сканера).
+Permissions уже прописаны в `mobile/android/app/src/main/AndroidManifest.xml`: `INTERNET`, `ACCESS_FINE_LOCATION`/`ACCESS_BACKGROUND_LOCATION`, `CAMERA`, `FOREGROUND_SERVICE_LOCATION`, `WAKE_LOCK`, плюс `<intent-filter>` для deeplink `airsoftmap://join/<code>`. На iOS в `Info.plist` доустанови `NSLocationWhenInUseUsageDescription` и `NSCameraUsageDescription` при первой публикации.
+
+---
+
+## Установка debug-APK на телефон
+
+Для быстрого тест-прогона без сборки руками:
+
+```bash
+cd mobile
+flutter build apk --debug
+# готовый файл: mobile/build/app/outputs/flutter-apk/app-debug.apk (~200 MB)
+```
+
+Перенос на телефон:
+
+1. На устройстве: **Настройки → Безопасность → Установка из неизвестных источников** → разрешить для проводника/мессенджера, через который копируешь APK.
+2. Залить APK любым способом — USB-кабель, Telegram «Saved messages», Google Drive, Bluetooth, `adb install`.
+3. Открыть APK на телефоне, подтвердить установку.
+4. Запустить **AirsoftMap** (зелёная иконка «AM»). Загрузится тёмно-зелёный splash, потом лобби.
+
+Перед реальным использованием в коде должен быть прописан `supabase_config.dart` с боевыми ключами Supabase. В debug-сборке без них работают только UI и оффлайн-карта; авторизация / Storage / сервер вернут ошибку соединения.
+
+Размер 200 MB у debug-APK — это норма (включены JIT, debug-символы, все ABI). Для боевой раздачи нужна release-сборка: `flutter build apk --release --split-per-abi` даст 3 файла по 30–50 MB.
 
 ---
 

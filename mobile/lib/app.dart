@@ -7,10 +7,12 @@ import 'features/game_create/game_create_screen.dart';
 import 'features/command/command_screen.dart';
 import 'features/battle_map/battle_map_screen.dart';
 import 'features/kill_state/kill_state_screen.dart';
+import 'features/splash/splash_screen.dart';
 
 final _router = GoRouter(
-  initialLocation: '/lobby',
+  initialLocation: '/splash',
   routes: [
+    GoRoute(path: '/splash', builder: (_, __) => const SplashScreen()),
     GoRoute(path: '/lobby', builder: (_, __) => const LobbyScreen()),
     GoRoute(path: '/create', builder: (_, __) => const GameCreateScreen()),
     GoRoute(path: '/command', builder: (_, __) => const CommandScreen()),

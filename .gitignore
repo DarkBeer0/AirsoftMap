@@ -37,6 +37,9 @@ mobile/.pub-cache/
 mobile/.pub/
 mobile/pubspec.lock
 
+# Drift codegen — генерируется через `dart run build_runner build`.
+mobile/lib/**/*.g.dart
+
 # === Android ===
 mobile/android/.gradle/
 mobile/android/local.properties

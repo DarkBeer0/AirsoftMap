@@ -17,8 +17,10 @@ dependencies:
   # Navigation
   go_router: ^14.2.7
 
-  # Maps (native MapLibre)
-  maplibre_gl: ^0.20.0
+  # Maps (native MapLibre). 0.20.x не собирается с актуальным Android SDK —
+  # старый namespace org.maplibre.maplibregl недоступен; 0.21+ использует
+  # обновлённый MapLibre Native.
+  maplibre_gl: ^0.21.0
   latlong2: ^0.9.1
 
   # QR
@@ -62,8 +64,32 @@ dev_dependencies:
   flutter_lints: ^4.0.0
   drift_dev: ^2.20.0
   build_runner: ^2.4.13
+  flutter_launcher_icons: ^0.14.1
+  flutter_native_splash: ^2.4.1
 
 flutter:
   uses-material-design: true
   assets:
     - assets/
+    - assets/icon/
+    - assets/splash/
+
+# Запуск:  dart run flutter_launcher_icons
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  remove_alpha_ios: true
+  image_path: "assets/icon/icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#1B5E20"
+  adaptive_icon_foreground: "assets/icon/icon_fg.png"
+
+# Запуск:  dart run flutter_native_splash:create
+flutter_native_splash:
+  color: "#1B5E20"
+  image: assets/splash/splash.png
+  android_12:
+    color: "#1B5E20"
+    image: assets/splash/splash.png
+  ios: true
+  android: true
