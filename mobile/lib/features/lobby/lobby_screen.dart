@@ -135,11 +135,14 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
       // 1. Гарантируем анонимную Supabase-сессию → JWT для нашего API.
       await ref.read(authServiceProvider).ensureSignedIn();
 
-      // 2. POST /games/join.
-      final result = await ref.read(gamesApiProvider).joinBySideCode(code);
+      // 2. POST /games/join — код может прийти как deeplink airsoftmap://join/CODE
+      //    (если организатор сгенерировал QR с префиксом) или как голый код.
+      final cleanCode = _extractCode(code);
+      final result =
+          await ref.read(gamesApiProvider).joinBySideCode(cleanCode);
 
       // 3. Сохраняем сессию — её прочитают battle_map / ws / kill_state.
-      ref.read(gameSessionProvider.notifier).set(result);
+      ref.read(gameSessionProvider.notifier).setFromJoin(result);
 
       messenger.showSnackBar(SnackBar(
         content: Text(
@@ -161,5 +164,17 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
     } finally {
       if (mounted) setState(() => _joining = false);
     }
+  }
+
+  /// Принимает как голый код (`ABCDE`), так и deeplink `airsoftmap://join/ABCDE`.
+  /// Если ничего не распознано — возвращает trimmed-uppercase исходник, а
+  /// валидацию переложит на сервер (404 invalid join code).
+  String _extractCode(String raw) {
+    final m = RegExp(
+      r'airsoftmap://join/([A-Za-z0-9]+)',
+      caseSensitive: false,
+    ).firstMatch(raw);
+    final code = m?.group(1) ?? raw;
+    return code.trim().toUpperCase();
   }
 }

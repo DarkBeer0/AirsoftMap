@@ -4,7 +4,6 @@ import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
-import '../../core/api/games_api.dart';
 import '../../core/session/game_session.dart';
 
 /// Боевая карта. Пока — онлайн OpenTopoMap + собственная позиция через
@@ -134,12 +133,18 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
 }
 
 class _SessionBadge extends StatelessWidget {
-  final JoinResult session;
+  final GameSession session;
   const _SessionBadge({required this.session});
 
   @override
   Widget build(BuildContext context) {
-    final color = _parseHexColor(session.sideColor) ?? Colors.green;
+    // У организатора стороны нет — показываем нейтральную серую точку
+    // и подпись «Organizer» вместо названия стороны.
+    final color = session.sideColor != null
+        ? (_parseHexColor(session.sideColor!) ?? Colors.green)
+        : Colors.grey;
+    final label = session.sideName ?? session.gameName;
+
     return Material(
       color: Colors.black.withOpacity(0.55),
       borderRadius: BorderRadius.circular(8),
@@ -155,7 +160,7 @@ class _SessionBadge extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                '${session.sideName} · ${session.callsign}',
+                '$label · ${session.callsign}',
                 style: const TextStyle(
                   color: Colors.white,
                   fontWeight: FontWeight.w600,
