@@ -6,25 +6,27 @@
 
 ## Текущий статус
 
-**Фаза 1 — каркас + одиночный flow, в работе.**
+**Фаза 1 завершена.** Полный flow: организатор создаёт игру → опционально скачивает топо-пачку полигона в MBTiles и заливает в Supabase Storage → раздаёт QR-коды сторон → бойцы сканируют → у всех (включая организатора) на боевой карте показывается локальная топо-карта и собственная позиция.
 
 Что уже работает end-to-end:
 
-- **Backend** компилируется и проходит `go vet` (`backend/`):
+- **Backend** (`backend/`, `go build ./...` + `go vet` чисты):
   - 4 миграции (games / sides / spawn_points / squads / game_members / markers / events + триггер `auth.users → profiles`)
   - `POST /api/v1/games` — атомарное создание игры + сторон + organizer-member в транзакции, генерация уникальных кодов (читаемый алфавит без `O/0/I/1/L`)
-  - `POST /api/v1/games/join` — вход по коду стороны, идемпотентный upsert участника (повторный join сохраняет role/status)
-  - `GET /api/v1/games/:id/members` — список с фильтром по правам: organizer / side_commander видят всех, остальные — только свою сторону, не-член получает 403
+  - `POST /api/v1/games/join` — вход по коду стороны, идемпотентный upsert (повторный join сохраняет role/status)
+  - `GET /api/v1/games/:id/members` — список с фильтром по правам: organizer / side_commander видят всех, остальные — только свою сторону; не-член получает 403
+  - `POST /api/v1/games/:id/map-pack` — записать URL Storage и (опц.) bbox; доступно только организатору
   - JWT-валидация (HS256) на всех защищённых эндпоинтах
-- **Mobile** (требует локально `flutter pub get` + `dart run build_runner build` + `supabase_config.dart`):
-  - Лобби с QR-сканером и ручным вводом кода → анонимная сессия Supabase → реальный `POST /games/join` → сессия сохраняется в Riverpod-провайдере → переход на боевую карту
-  - Парсер deeplink `airsoftmap://join/<code>` для QR (с фолбэком на голый код)
-  - Экран создания игры: название + 1..8 сторон (цвет из палитры) → `POST /games` → QR-коды каждой стороны (через `qr_flutter`), копирование кода в буфер, переход на карту с organizer-сессией
-  - Боевая карта: MapLibre с raster-источником OpenTopoMap, нативный GPS-маркер с трекингом и компасом, плашка `сторона / позывной / роль` (для organizer — серая точка + имя игры), атрибуция CC-BY-SA, кнопка «УБИТ»
+- **Mobile** (требует локально `flutter pub get` + `dart run build_runner build` + `supabase_config.dart` + Storage bucket `map-packs`):
+  - Лобби с QR-сканером (deeplink `airsoftmap://join/<code>`) и ручным вводом → анонимная Supabase-сессия → `POST /games/join` → сохранение в Riverpod-сессии → переход на боевую карту
+  - Экран создания игры: имя + 1..8 сторон с палитрой, опциональный switch «Оффлайн-карта» (центр через GPS + slider 0.5–5 км, оценка тайлов и MB с предупреждением >70 MB) → POST → прогресс скачивания тайлов → upload в Supabase Storage → PATCH → QR-коды сторон (`qr_flutter`, deeplink + копирование в буфер)
+  - `TileDownloader` с очередью worker-ов на shared iterator, User-Agent, exp-backoff retry, batched INSERT в одной транзакции, MBTiles metadata (bounds/minzoom/maxzoom/attribution)
+  - `MbtilesServer` (shelf на loopback) поднимается из боевой карты, MapLibre рендерит raster через `http://127.0.0.1:{port}/tiles/{z}/{x}/{y}.png`; при ошибке оффлайн-пачки — fallback на онлайн OpenTopoMap с баннером
+  - Боевая карта: динамический style (offline/online), нативный GPS-маркер с трекингом и компасом, плашка `сторона / позывной / роль` (organizer — серая точка + имя игры), атрибуция CC-BY-SA, кнопка «УБИТ»
   - GPS-разрешения запрашиваются с retry-баннером при отказе
-  - `GameSession` (Riverpod) — единая доменная модель для soldier/organizer сессий
+  - `GameSession` (Riverpod) — единая доменная модель для soldier/organizer; `setMapPack` обновляет URL после upload
 
-Открытые риски (план Фазы 3 и далее): WS-хаб дёргает БД на каждый пакет (B1), нет foreground-сервиса для GPS (C7), валидация координат внутри bbox (D1) — см. также рекурсивный анализ в истории планов.
+Открытые риски (Фаза 3+): WS-хаб дёргает БД на каждый пакет (B1), нет foreground-сервиса для GPS и shelf-сервера (C6/C7), валидация координат внутри bbox (D1), Kalman пока минимальный (C1) — см. рекурсивный анализ в истории планов.
 
 ---
 
@@ -300,13 +302,13 @@ airsoftmap/
 - [x] Supabase Auth (анонимные сессии)
 - [x] Drift схемы (games, markers, events) — *локально требует `dart run build_runner build` для `database.g.dart`*
 - [x] MapLibre + онлайн OpenTopoMap (без оффлайна)
-- [x] Экран создания игры: форма + стороны + QR-коды (через `qr_flutter`) *(без bbox / загрузки тайлов — это в Фазе 2)*
-- [ ] Экран создания игры: bbox на карте → загрузка тайлов → MBTiles
-- [x] `shelf`-сервер на localhost для отдачи MBTiles *(код готов в `core/map/`, ещё не подключён к battle_map)*
-- [ ] Переключение MapLibre на локальный источник
+- [x] Экран создания игры: форма + стороны + QR-коды (через `qr_flutter`)
+- [x] Экран создания игры: bbox (через GPS-центр + size) → загрузка тайлов → MBTiles
+- [x] `shelf`-сервер на localhost для отдачи MBTiles
+- [x] Переключение MapLibre на локальный источник
 - [x] Go-бэкенд: миграции (4 шт) + модели games/sides/members/markers/events
-- [x] Эндпоинты создания/получения игры: `POST /games`, `POST /games/join`, `GET /games/:id/members`
-- [ ] Загрузка MBTiles в Supabase Storage
+- [x] Эндпоинты: `POST /games`, `POST /games/join`, `GET /games/:id/members`, `POST /games/:id/map-pack`
+- [x] Загрузка MBTiles в Supabase Storage
 
 ### Фаза 2 — Лобби, QR, распределение
 
@@ -359,10 +361,21 @@ go run cmd/api/main.go
 
 ```bash
 cd mobile
+flutter create --org com.airsoftmap --project-name airsoftmap .  # один раз
 flutter pub get
-# настроить Supabase ключи в lib/core/config/supabase_config.dart
+dart run build_runner build --delete-conflicting-outputs          # сгенерирует database.g.dart
+cp lib/core/config/supabase_config.dart.example lib/core/config/supabase_config.dart
+# отредактировать supabase_config.dart с твоими ключами
 flutter run
 ```
+
+Дополнительно в Supabase:
+
+- Auth → Providers → **Anonymous Sign-Ins** = enabled
+- Storage → New bucket → **`map-packs`**, public = yes (иначе организатор не сможет залить .mbtiles)
+- Если миграция `004_profiles_trigger.up.sql` упала на правах — прогнать её через **SQL Editor** под ролью postgres
+
+На Android в `android/app/src/main/AndroidManifest.xml` нужны `ACCESS_FINE_LOCATION`, `INTERNET`; на iOS в `Info.plist` — `NSLocationWhenInUseUsageDescription` и `NSCameraUsageDescription` (для QR-сканера).
 
 ---
 

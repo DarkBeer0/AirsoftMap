@@ -205,6 +205,40 @@ func (s *GameService) JoinBySideCode(ctx context.Context, userID, sideCode, call
 	return &JoinResult{Game: *game, Side: *side, Member: *actual}, nil
 }
 
+type SetMapPackInput struct {
+	UserID     string
+	GameID     string
+	MapPackURL string
+	BboxMinLng *float64
+	BboxMinLat *float64
+	BboxMaxLng *float64
+	BboxMaxLat *float64
+}
+
+// SetMapPack — записать URL .mbtiles в Storage и (опц.) обновить bbox.
+// Доступно только организатору игры.
+func (s *GameService) SetMapPack(ctx context.Context, in SetMapPackInput) error {
+	if in.GameID == "" || in.MapPackURL == "" {
+		return fmt.Errorf("%w: game_id and map_pack_url required", ErrValidation)
+	}
+	db := s.games.DB()
+
+	member, err := s.members.ByUserAndGame(db, in.UserID, in.GameID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return ErrForbidden
+		}
+		return err
+	}
+	if member.Role != model.RoleOrganizer {
+		return ErrForbidden
+	}
+	return s.games.UpdateMapPack(
+		db, in.GameID, in.MapPackURL,
+		in.BboxMinLng, in.BboxMinLat, in.BboxMaxLng, in.BboxMaxLat,
+	)
+}
+
 // ListMembers — список участников игры с учётом прав:
 //   - organizer / side_commander → видят всех;
 //   - squad_leader / soldier      → только свою сторону (включая себя).

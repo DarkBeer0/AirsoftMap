@@ -59,6 +59,24 @@ class GameSessionNotifier extends Notifier<GameSession?> {
 
   void setFromJoin(JoinResult result) => state = GameSession.fromJoin(result);
   void setForOrganizer(CreatedGame g) => state = GameSession.forOrganizer(g);
+
+  /// Обновить URL пачки в существующей сессии — нужно после успешного upload,
+  /// чтобы боевая карта переключилась на MBTiles без повторного create.
+  void setMapPack(String url) {
+    final cur = state;
+    if (cur == null) return;
+    state = GameSession(
+      gameId: cur.gameId,
+      gameName: cur.gameName,
+      callsign: cur.callsign,
+      role: cur.role,
+      sideId: cur.sideId,
+      sideName: cur.sideName,
+      sideColor: cur.sideColor,
+      mapPackUrl: url,
+    );
+  }
+
   void clear() => state = null;
 }
 

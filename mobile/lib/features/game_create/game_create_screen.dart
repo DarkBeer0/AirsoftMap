@@ -1,22 +1,28 @@
+import 'dart:io';
+import 'dart:math' as math;
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../../core/api/games_api.dart';
 import '../../core/auth/auth_provider.dart';
+import '../../core/map/map_pack_uploader.dart';
+import '../../core/map/tile_downloader.dart';
 import '../../core/session/game_session.dart';
 
 /// Создание игры организатором.
 ///
-/// Двухшаговый flow:
-///   1. _Step.form     — название + список сторон с цветами.
-///   2. _Step.created  — QR-коды join_code'ов сторон для раздачи на базе.
-///
-/// Bbox и map-pack — задача Фазы 2 (TileDownloader + Supabase Storage),
-/// пока создаём игру «голой» и переходим на боевую карту с онлайн OpenTopoMap.
+/// Шаги:
+///   1. _Step.form         — название + стороны (+ опц. оффлайн-карта).
+///   2. _Step.downloading  — прогресс: скачивание тайлов → upload → PATCH.
+///   3. _Step.created      — QR-коды join_code'ов сторон.
 class GameCreateScreen extends ConsumerStatefulWidget {
   const GameCreateScreen({super.key});
 
@@ -24,7 +30,7 @@ class GameCreateScreen extends ConsumerStatefulWidget {
   ConsumerState<GameCreateScreen> createState() => _GameCreateScreenState();
 }
 
-enum _Step { form, created }
+enum _Step { form, downloading, created }
 
 class _SideDraft {
   final TextEditingController name;
@@ -36,15 +42,16 @@ class _SideDraft {
 
 class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
   static const _palette = <Color>[
-    Color(0xFFE53935), // red
-    Color(0xFF1E88E5), // blue
-    Color(0xFF43A047), // green
-    Color(0xFFFB8C00), // orange
-    Color(0xFF8E24AA), // purple
-    Color(0xFFFDD835), // yellow
-    Color(0xFF00ACC1), // cyan
-    Color(0xFFEC407A), // pink
+    Color(0xFFE53935), Color(0xFF1E88E5), Color(0xFF43A047),
+    Color(0xFFFB8C00), Color(0xFF8E24AA), Color(0xFFFDD835),
+    Color(0xFF00ACC1), Color(0xFFEC407A),
   ];
+
+  // Zoom-окно для топо-карты полигона. Меньше — крупный план, больше — обзор.
+  static const _minZoom = 12;
+  static const _maxZoom = 17;
+  // Если оценочный размер пачки превысит — блокируем submit и просим уменьшить.
+  static const _maxSizeBytes = 70 * 1024 * 1024; // 70 MB
 
   final _nameCtrl = TextEditingController(text: 'Игра');
   final _formKey = GlobalKey<FormState>();
@@ -53,6 +60,16 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
   _Step _step = _Step.form;
   bool _submitting = false;
   CreatedGame? _created;
+
+  // Bbox-сostояние.
+  bool _offlineMap = true;
+  ({double lat, double lng})? _center;
+  double _sizeKm = 2.0;
+  String? _locationError;
+
+  // Прогресс шага downloading.
+  String _progressLabel = '';
+  double? _progressValue; // null → indeterminate
 
   @override
   void initState() {
@@ -76,21 +93,30 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_step == _Step.form ? 'Создание игры' : 'Игра создана'),
-        leading: BackButton(
-          onPressed: () => context.go('/lobby'),
-        ),
+        title: Text(switch (_step) {
+          _Step.form => 'Создание игры',
+          _Step.downloading => 'Подготовка карты',
+          _Step.created => 'Игра создана',
+        }),
+        leading: BackButton(onPressed: () => context.go('/lobby')),
       ),
       body: switch (_step) {
         _Step.form => _buildForm(),
+        _Step.downloading => _buildDownloading(),
         _Step.created => _buildCreated(),
       },
     );
   }
 
-  // --- Form ---
+  // ─── Form ─────────────────────────────────────────────────────────────────
 
   Widget _buildForm() {
+    final tiles = _estimateTiles();
+    final bytes = TileDownloader.estimateBytes(tiles);
+    final tooBig = bytes > _maxSizeBytes;
+    final canSubmit = !_submitting &&
+        (!_offlineMap || (_center != null && !tooBig));
+
     return Form(
       key: _formKey,
       child: ListView(
@@ -122,19 +148,19 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
           ),
           const SizedBox(height: 8),
           ..._sides.asMap().entries.map((e) => _buildSideRow(e.key, e.value)),
+          const SizedBox(height: 16),
+          _buildOfflineMapBlock(tiles, bytes, tooBig),
           const SizedBox(height: 24),
           FilledButton(
-            onPressed: _submitting ? null : _submit,
+            onPressed: canSubmit ? _submit : null,
             style: FilledButton.styleFrom(
               padding: const EdgeInsets.symmetric(vertical: 16),
             ),
             child: _submitting
                 ? const SizedBox(
-                    height: 22,
-                    width: 22,
+                    height: 22, width: 22,
                     child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
+                      strokeWidth: 2, color: Colors.white,
                     ),
                   )
                 : const Text('Создать игру', style: TextStyle(fontSize: 18)),
@@ -152,8 +178,7 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
           GestureDetector(
             onTap: () => _pickColor(index),
             child: Container(
-              width: 36,
-              height: 36,
+              width: 36, height: 36,
               decoration: BoxDecoration(
                 color: side.color,
                 shape: BoxShape.circle,
@@ -189,6 +214,88 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
     );
   }
 
+  Widget _buildOfflineMapBlock(int tiles, int bytes, bool tooBig) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              value: _offlineMap,
+              onChanged: (v) => setState(() => _offlineMap = v),
+              title: const Text('Оффлайн-карта полигона'),
+              subtitle: const Text(
+                'Скачать топо-тайлы заранее, чтобы карта работала без связи',
+              ),
+            ),
+            if (_offlineMap) ...[
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  Expanded(
+                    child: _center == null
+                        ? Text(
+                            _locationError ?? 'Центр не задан',
+                            style: TextStyle(
+                              color: _locationError != null
+                                  ? Colors.orange
+                                  : Colors.white70,
+                            ),
+                          )
+                        : Text(
+                            'Центр: ${_center!.lat.toStringAsFixed(5)}, '
+                            '${_center!.lng.toStringAsFixed(5)}',
+                            style: const TextStyle(color: Colors.white70),
+                          ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _useCurrentLocation,
+                    icon: const Icon(Icons.my_location),
+                    label: const Text('Текущее'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  const Text('Размер'),
+                  Expanded(
+                    child: Slider(
+                      value: _sizeKm,
+                      min: 0.5,
+                      max: 5.0,
+                      divisions: 9,
+                      label: '${_sizeKm.toStringAsFixed(1)} км',
+                      onChanged: (v) => setState(() => _sizeKm = v),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 56,
+                    child: Text(
+                      '${_sizeKm.toStringAsFixed(1)} км',
+                      textAlign: TextAlign.right,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Оценка: $tiles тайлов · ~${_formatBytes(bytes)}'
+                '${tooBig ? "  ⚠ слишком много, уменьшите размер" : ""}',
+                style: TextStyle(
+                  color: tooBig ? Colors.red : Colors.white70,
+                  fontSize: 12,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   void _addSide() {
     final usedColors = _sides.map((s) => s.color).toSet();
     final nextColor = _palette.firstWhere(
@@ -204,8 +311,7 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
   }
 
   void _removeSide(int index) {
-    final removed = _sides.removeAt(index);
-    removed.dispose();
+    _sides.removeAt(index).dispose();
     setState(() {});
   }
 
@@ -218,20 +324,17 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
           spacing: 12,
           runSpacing: 12,
           children: _palette
-              .map(
-                (c) => GestureDetector(
-                  onTap: () => Navigator.pop(ctx, c),
-                  child: Container(
-                    width: 44,
-                    height: 44,
-                    decoration: BoxDecoration(
-                      color: c,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white, width: 2),
+              .map((c) => GestureDetector(
+                    onTap: () => Navigator.pop(ctx, c),
+                    child: Container(
+                      width: 44, height: 44,
+                      decoration: BoxDecoration(
+                        color: c,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.white, width: 2),
+                      ),
                     ),
-                  ),
-                ),
-              )
+                  ))
               .toList(),
         ),
       ),
@@ -241,27 +344,80 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
     }
   }
 
+  Future<void> _useCurrentLocation() async {
+    try {
+      var perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied) {
+        perm = await Geolocator.requestPermission();
+      }
+      if (perm != LocationPermission.always &&
+          perm != LocationPermission.whileInUse) {
+        setState(() => _locationError = 'Нет разрешения на геолокацию');
+        return;
+      }
+      final pos = await Geolocator.getCurrentPosition();
+      setState(() {
+        _center = (lat: pos.latitude, lng: pos.longitude);
+        _locationError = null;
+      });
+    } catch (e) {
+      setState(() => _locationError = 'GPS ошибка: $e');
+    }
+  }
+
+  int _estimateTiles() {
+    if (!_offlineMap || _center == null) return 0;
+    final bbox = _bboxAroundCenter(_center!.lat, _center!.lng, _sizeKm);
+    return TileDownloader.tilesForBbox(
+      minLng: bbox.minLng,
+      minLat: bbox.minLat,
+      maxLng: bbox.maxLng,
+      maxLat: bbox.maxLat,
+      minZoom: _minZoom,
+      maxZoom: _maxZoom,
+    ).length;
+  }
+
+  // ─── Submit ────────────────────────────────────────────────────────────────
+
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _submitting = true);
+
     final messenger = ScaffoldMessenger.of(context);
+    final hasBbox = _offlineMap && _center != null;
+    final bbox = hasBbox
+        ? _bboxAroundCenter(_center!.lat, _center!.lng, _sizeKm)
+        : null;
+
     try {
-      // 1. Гарантируем JWT — без него Create вернёт 401.
       await ref.read(authServiceProvider).ensureSignedIn();
 
-      // 2. POST /games.
+      // 1. POST /games — игра создаётся всегда, даже если последующая
+      // загрузка пачки упадёт. Организатор сможет повторить загрузку через
+      // POST /games/:id/map-pack позже.
       final game = await ref.read(gamesApiProvider).create(
             name: _nameCtrl.text.trim(),
             sides: _sides
-                .map((s) => SideInput(
-                      name: s.name.text.trim(),
-                      color: _hex(s.color),
-                    ))
+                .map((s) =>
+                    SideInput(name: s.name.text.trim(), color: _hex(s.color)))
                 .toList(),
+            bboxMinLng: bbox?.minLng,
+            bboxMinLat: bbox?.minLat,
+            bboxMaxLng: bbox?.maxLng,
+            bboxMaxLat: bbox?.maxLat,
           );
 
-      // 3. Сохраняем organizer-сессию (без стороны), её прочитает battle_map.
       ref.read(gameSessionProvider.notifier).setForOrganizer(game);
+
+      if (bbox != null) {
+        if (!mounted) return;
+        setState(() {
+          _step = _Step.downloading;
+          _submitting = false; // дальше живёт _progressLabel
+        });
+        await _downloadAndUpload(game, bbox);
+      }
 
       if (!mounted) return;
       setState(() {
@@ -270,16 +426,124 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
       });
     } on DioException catch (e) {
       messenger.showSnackBar(SnackBar(
-        content: Text('Ошибка создания: ${e.response?.statusCode ?? e.message}'),
+        content: Text('Ошибка сети: ${e.response?.statusCode ?? e.message}'),
       ));
+      if (mounted) setState(() => _step = _Step.form);
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+      if (mounted) setState(() => _step = _Step.form);
     } finally {
       if (mounted) setState(() => _submitting = false);
     }
   }
 
-  // --- Created (QR-коды) ---
+  Future<void> _downloadAndUpload(
+    CreatedGame game,
+    ({double minLng, double minLat, double maxLng, double maxLat}) bbox,
+  ) async {
+    // 1. Подготовка файла.
+    final docs = await getApplicationDocumentsDirectory();
+    final mapsDir = Directory(p.join(docs.path, 'maps'));
+    if (!mapsDir.existsSync()) mapsDir.createSync(recursive: true);
+    final filePath = p.join(mapsDir.path, '${game.id}.mbtiles');
+    final file = File(filePath);
+    if (file.existsSync()) file.deleteSync(); // переотрисовка с нуля
+
+    // 2. Скачивание тайлов.
+    final tiles = TileDownloader.tilesForBbox(
+      minLng: bbox.minLng, minLat: bbox.minLat,
+      maxLng: bbox.maxLng, maxLat: bbox.maxLat,
+      minZoom: _minZoom, maxZoom: _maxZoom,
+    );
+    if (mounted) {
+      setState(() {
+        _progressLabel = 'Скачиваю тайлы 0/${tiles.length}';
+        _progressValue = 0;
+      });
+    }
+
+    final downloader = TileDownloader();
+    final result = await downloader.downloadToMbtiles(
+      tiles: tiles,
+      outputPath: filePath,
+      bboxMinLng: bbox.minLng, bboxMinLat: bbox.minLat,
+      bboxMaxLng: bbox.maxLng, bboxMaxLat: bbox.maxLat,
+      minZoom: _minZoom, maxZoom: _maxZoom,
+      name: game.name,
+      onProgress: (done, total) {
+        if (!mounted) return;
+        setState(() {
+          _progressLabel = 'Скачиваю тайлы $done/$total';
+          _progressValue = total == 0 ? null : done / total;
+        });
+      },
+    );
+
+    if (result.downloaded == 0) {
+      throw Exception('Не удалось скачать ни одного тайла');
+    }
+
+    // 3. Upload в Supabase Storage.
+    if (mounted) {
+      setState(() {
+        _progressLabel =
+            'Заливаю карту (${_formatBytes(result.sizeBytes)})...';
+        _progressValue = null;
+      });
+    }
+    final publicUrl =
+        await ref.read(mapPackUploaderProvider).upload(game.id, file);
+
+    // 4. PATCH /games/:id/map-pack — фиксируем URL в БД.
+    if (mounted) {
+      setState(() {
+        _progressLabel = 'Сохраняю ссылку...';
+        _progressValue = null;
+      });
+    }
+    await ref.read(gamesApiProvider).setMapPack(
+          gameId: game.id,
+          mapPackUrl: publicUrl,
+          bboxMinLng: bbox.minLng,
+          bboxMinLat: bbox.minLat,
+          bboxMaxLng: bbox.maxLng,
+          bboxMaxLat: bbox.maxLat,
+        );
+
+    // 5. Обновляем сессию — battle_map увидит mapPackUrl и переключится на MBTiles.
+    //    Файл уже лежит локально по тому же пути, что и ожидает battle_map,
+    //    повторного скачивания не будет.
+    ref.read(gameSessionProvider.notifier).setMapPack(publicUrl);
+  }
+
+  // ─── Downloading step ─────────────────────────────────────────────────────
+
+  Widget _buildDownloading() {
+    return Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.cloud_download_outlined, size: 64),
+          const SizedBox(height: 24),
+          Text(
+            _progressLabel.isEmpty ? 'Готовлю...' : _progressLabel,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 16),
+          ),
+          const SizedBox(height: 16),
+          LinearProgressIndicator(value: _progressValue),
+          const SizedBox(height: 8),
+          const Text(
+            'Не закрывай приложение, пока идёт загрузка',
+            style: TextStyle(color: Colors.white54, fontSize: 12),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Created step ─────────────────────────────────────────────────────────
 
   Widget _buildCreated() {
     final created = _created!;
@@ -326,8 +590,6 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
   Widget _sideQrCard(CreatedSide side) {
     final color = _parseHex(side.color) ?? Colors.green;
     final code = side.joinCode ?? '—';
-    // Deeplink, который lobby умеет распарсить; на случай старых сканеров
-    // под код подписан сам raw-код тоже.
     final qrData = 'airsoftmap://join/$code';
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 8),
@@ -339,9 +601,9 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
             Row(
               children: [
                 Container(
-                  width: 18,
-                  height: 18,
-                  decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                  width: 18, height: 18,
+                  decoration:
+                      BoxDecoration(color: color, shape: BoxShape.circle),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -398,10 +660,16 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
     );
   }
 
-  // --- helpers ---
+  // ─── helpers ──────────────────────────────────────────────────────────────
 
   String _hex(Color c) =>
       '#${c.value.toRadixString(16).padLeft(8, '0').substring(2).toUpperCase()}';
+
+  String _formatBytes(int b) {
+    if (b < 1024) return '$b B';
+    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(0)} KB';
+    return '${(b / 1024 / 1024).toStringAsFixed(1)} MB';
+  }
 }
 
 Color? _parseHex(String hex) {
@@ -409,4 +677,18 @@ Color? _parseHex(String hex) {
   if (s.length == 6) return Color(int.parse('FF$s', radix: 16));
   if (s.length == 8) return Color(int.parse(s, radix: 16));
   return null;
+}
+
+/// Квадратный bbox со стороной `sizeKm`, центрированный на (lat, lng).
+({double minLng, double minLat, double maxLng, double maxLat})
+    _bboxAroundCenter(double lat, double lng, double sizeKm) {
+  // 1 градус широты ≈ 111 км; долгота сжимается по широте через cos.
+  final dLat = (sizeKm / 2) / 111.0;
+  final dLng = (sizeKm / 2) / (111.0 * math.cos(lat * math.pi / 180));
+  return (
+    minLng: lng - dLng,
+    minLat: lat - dLat,
+    maxLng: lng + dLng,
+    maxLat: lat + dLat,
+  );
 }

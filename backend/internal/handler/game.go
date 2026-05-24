@@ -160,8 +160,47 @@ func (h *GameHandler) Update(c *gin.Context) {
 	c.JSON(http.StatusNotImplemented, gin.H{"todo": "update game"})
 }
 
+type setMapPackRequest struct {
+	MapPackURL string   `json:"map_pack_url" binding:"required,url"`
+	BboxMinLng *float64 `json:"bbox_min_lng,omitempty"`
+	BboxMinLat *float64 `json:"bbox_min_lat,omitempty"`
+	BboxMaxLng *float64 `json:"bbox_max_lng,omitempty"`
+	BboxMaxLat *float64 `json:"bbox_max_lat,omitempty"`
+}
+
 func (h *GameHandler) SetMapPack(c *gin.Context) {
-	c.JSON(http.StatusNotImplemented, gin.H{"todo": "set map pack"})
+	gameID := c.Param("id")
+	var req setMapPackRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	userID := middleware.UserID(c)
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "no user"})
+		return
+	}
+	err := h.svc.SetMapPack(c.Request.Context(), service.SetMapPackInput{
+		UserID:     userID,
+		GameID:     gameID,
+		MapPackURL: req.MapPackURL,
+		BboxMinLng: req.BboxMinLng,
+		BboxMinLat: req.BboxMinLat,
+		BboxMaxLng: req.BboxMaxLng,
+		BboxMaxLat: req.BboxMaxLat,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrForbidden):
+			c.JSON(http.StatusForbidden, gin.H{"error": "only organizer can set map pack"})
+		case errors.Is(err, service.ErrValidation):
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		}
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (h *GameHandler) GenerateQR(c *gin.Context) {

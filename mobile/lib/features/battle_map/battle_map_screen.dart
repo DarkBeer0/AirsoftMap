@@ -1,14 +1,20 @@
+import 'dart:io';
+
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
+import '../../core/map/mbtiles_server.dart';
 import '../../core/session/game_session.dart';
 
-/// Боевая карта. Пока — онлайн OpenTopoMap + собственная позиция через
-/// нативный location-слой MapLibre. В фазе 2 переключим source на
-/// локальный MBTiles-сервер; в фазе 3 добавим WS-слой союзников и меток.
+/// Боевая карта. Если у сессии есть `mapPackUrl` — скачиваем .mbtiles
+/// (или используем кэшированный), поднимаем локальный shelf-сервер и
+/// рендерим MapLibre поверх него. Иначе — fallback на онлайн OpenTopoMap.
 class BattleMapScreen extends ConsumerStatefulWidget {
   const BattleMapScreen({super.key});
 
@@ -17,8 +23,6 @@ class BattleMapScreen extends ConsumerStatefulWidget {
 }
 
 class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
-  // Стиль MapLibre: один raster-источник OpenTopoMap.
-  // Атрибуция OpenTopoMap (CC-BY-SA) обязательна — показываем её в углу.
   static const _onlineStyle = '''
 {
   "version": 8,
@@ -41,13 +45,84 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
 }
 ''';
 
+  MbtilesServer? _mbtilesServer;
+  String? _styleString;
+  String? _statusMsg;
   bool _locationGranted = false;
   String? _permissionError;
+  bool _usingOffline = false;
 
   @override
   void initState() {
     super.initState();
-    _requestLocation();
+    _bootstrap();
+  }
+
+  @override
+  void dispose() {
+    _mbtilesServer?.stop();
+    super.dispose();
+  }
+
+  Future<void> _bootstrap() async {
+    await _requestLocation();
+
+    final session = ref.read(gameSessionProvider);
+    final url = session?.mapPackUrl;
+    if (session == null || url == null || url.isEmpty) {
+      // Оффлайн-пачки нет — работаем по онлайн-источнику.
+      if (mounted) setState(() => _styleString = _onlineStyle);
+      return;
+    }
+
+    try {
+      final filePath = await _ensureMapPack(session.gameId, url);
+      final server = MbtilesServer();
+      await server.start(filePath);
+      _mbtilesServer = server;
+      if (mounted) {
+        setState(() {
+          _styleString = _buildOfflineStyle(server.tileUrl);
+          _usingOffline = true;
+        });
+      }
+    } catch (e) {
+      // Любая ошибка (скачивания, sqlite, shelf) — fallback на онлайн,
+      // чтобы организатор/боец не остался без карты вообще.
+      if (mounted) {
+        setState(() {
+          _styleString = _onlineStyle;
+          _statusMsg = 'Оффлайн-карта недоступна, перешли на онлайн: $e';
+        });
+      }
+    }
+  }
+
+  Future<String> _ensureMapPack(String gameId, String url) async {
+    final docs = await getApplicationDocumentsDirectory();
+    final mapsDir = Directory(p.join(docs.path, 'maps'));
+    if (!mapsDir.existsSync()) mapsDir.createSync(recursive: true);
+    final filePath = p.join(mapsDir.path, '$gameId.mbtiles');
+    final file = File(filePath);
+    if (file.existsSync() && file.lengthSync() > 0) {
+      return filePath; // уже кэширован (организатор/повторный заход)
+    }
+    if (mounted) setState(() => _statusMsg = 'Скачиваю карту полигона…');
+    final dio = Dio(BaseOptions(
+      receiveTimeout: const Duration(minutes: 5),
+      connectTimeout: const Duration(seconds: 15),
+    ));
+    final res = await dio.get<List<int>>(
+      url,
+      options: Options(responseType: ResponseType.bytes),
+    );
+    final data = res.data;
+    if (data == null || data.isEmpty) {
+      throw Exception('пустой ответ Storage');
+    }
+    file.writeAsBytesSync(data, flush: true);
+    if (mounted) setState(() => _statusMsg = null);
+    return filePath;
   }
 
   Future<void> _requestLocation() async {
@@ -69,16 +144,41 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
     }
   }
 
+  String _buildOfflineStyle(String tileUrl) => '''
+{
+  "version": 8,
+  "sources": {
+    "mbtiles": {
+      "type": "raster",
+      "tiles": ["$tileUrl"],
+      "tileSize": 256,
+      "maxzoom": 17
+    }
+  },
+  "layers": [
+    {"id": "bg", "type": "background", "paint": {"background-color": "#cfd8dc"}},
+    {"id": "mbtiles", "type": "raster", "source": "mbtiles"}
+  ]
+}
+''';
+
   @override
   Widget build(BuildContext context) {
     final session = ref.watch(gameSessionProvider);
+
+    if (_styleString == null) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
     return Scaffold(
       body: Stack(
         children: [
           MapLibreMap(
-            styleString: _onlineStyle,
+            styleString: _styleString!,
             initialCameraPosition: const CameraPosition(
-              // Дефолтный центр пока bbox игры не пришёл. Москва как нейтральная точка.
+              // Дефолтный центр пока bbox игры не пришёл в сессию.
               target: LatLng(55.751244, 37.618423),
               zoom: 13,
             ),
@@ -97,19 +197,28 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
                 if (session != null) _SessionBadge(session: session),
                 if (_permissionError != null) ...[
                   const SizedBox(height: 6),
-                  _PermissionBanner(
+                  _Banner(
                     message: _permissionError!,
+                    color: Colors.orange.shade800,
+                    icon: Icons.warning_amber,
                     onRetry: _requestLocation,
+                  ),
+                ],
+                if (_statusMsg != null) ...[
+                  const SizedBox(height: 6),
+                  _Banner(
+                    message: _statusMsg!,
+                    color: Colors.blueGrey.shade800,
+                    icon: Icons.info_outline,
                   ),
                 ],
               ],
             ),
           ),
-          // Атрибуция OpenTopoMap — обязательна по лицензии CC-BY-SA.
-          const Positioned(
+          Positioned(
             left: 8,
             bottom: 8,
-            child: _Attribution(),
+            child: _Attribution(offline: _usingOffline),
           ),
           Positioned(
             right: 16,
@@ -138,8 +247,6 @@ class _SessionBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // У организатора стороны нет — показываем нейтральную серую точку
-    // и подпись «Organizer» вместо названия стороны.
     final color = session.sideColor != null
         ? (_parseHexColor(session.sideColor!) ?? Colors.green)
         : Colors.grey;
@@ -153,8 +260,7 @@ class _SessionBadge extends StatelessWidget {
         child: Row(
           children: [
             Container(
-              width: 14,
-              height: 14,
+              width: 14, height: 14,
               decoration: BoxDecoration(color: color, shape: BoxShape.circle),
             ),
             const SizedBox(width: 8),
@@ -179,21 +285,28 @@ class _SessionBadge extends StatelessWidget {
   }
 }
 
-class _PermissionBanner extends StatelessWidget {
+class _Banner extends StatelessWidget {
   final String message;
-  final VoidCallback onRetry;
-  const _PermissionBanner({required this.message, required this.onRetry});
+  final Color color;
+  final IconData icon;
+  final VoidCallback? onRetry;
+  const _Banner({
+    required this.message,
+    required this.color,
+    required this.icon,
+    this.onRetry,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.orange.shade800,
+      color: color,
       borderRadius: BorderRadius.circular(8),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         child: Row(
           children: [
-            const Icon(Icons.warning_amber, color: Colors.white, size: 18),
+            Icon(icon, color: Colors.white, size: 18),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -201,11 +314,12 @@ class _PermissionBanner extends StatelessWidget {
                 style: const TextStyle(color: Colors.white, fontSize: 12),
               ),
             ),
-            TextButton(
-              onPressed: onRetry,
-              style: TextButton.styleFrom(foregroundColor: Colors.white),
-              child: const Text('Повторить'),
-            ),
+            if (onRetry != null)
+              TextButton(
+                onPressed: onRetry,
+                style: TextButton.styleFrom(foregroundColor: Colors.white),
+                child: const Text('Повторить'),
+              ),
           ],
         ),
       ),
@@ -214,7 +328,8 @@ class _PermissionBanner extends StatelessWidget {
 }
 
 class _Attribution extends StatelessWidget {
-  const _Attribution();
+  final bool offline;
+  const _Attribution({this.offline = false});
 
   @override
   Widget build(BuildContext context) {
@@ -224,9 +339,11 @@ class _Attribution extends StatelessWidget {
         color: Colors.black54,
         borderRadius: BorderRadius.circular(4),
       ),
-      child: const Text(
-        '© OpenStreetMap · OpenTopoMap (CC-BY-SA)',
-        style: TextStyle(color: Colors.white, fontSize: 10),
+      child: Text(
+        offline
+            ? '© OSM · OpenTopoMap (CC-BY-SA) · offline'
+            : '© OpenStreetMap · OpenTopoMap (CC-BY-SA)',
+        style: const TextStyle(color: Colors.white, fontSize: 10),
       ),
     );
   }

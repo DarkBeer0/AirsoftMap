@@ -112,6 +112,24 @@ class GamesApi {
     });
     return JoinResult.fromJson(res.data as Map<String, dynamic>);
   }
+
+  /// PATCH-эквивалент: POST /games/:id/map-pack. Доступно только организатору.
+  Future<void> setMapPack({
+    required String gameId,
+    required String mapPackUrl,
+    double? bboxMinLng,
+    double? bboxMinLat,
+    double? bboxMaxLng,
+    double? bboxMaxLat,
+  }) async {
+    await _dio.post('/games/$gameId/map-pack', data: {
+      'map_pack_url': mapPackUrl,
+      if (bboxMinLng != null) 'bbox_min_lng': bboxMinLng,
+      if (bboxMinLat != null) 'bbox_min_lat': bboxMinLat,
+      if (bboxMaxLng != null) 'bbox_max_lng': bboxMaxLng,
+      if (bboxMaxLat != null) 'bbox_max_lat': bboxMaxLat,
+    });
+  }
 }
 
 final gamesApiProvider = Provider<GamesApi>((ref) {

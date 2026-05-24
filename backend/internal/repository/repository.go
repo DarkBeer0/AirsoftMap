@@ -66,6 +66,25 @@ func (r *GamesRepo) ByJoinCode(q Querier, code string) (*model.Game, error) {
 	return &g, nil
 }
 
+// UpdateMapPack — выставляет URL пачки и (опц.) перезаписывает bbox.
+// nil-поля bbox оставляют текущие значения благодаря COALESCE.
+func (r *GamesRepo) UpdateMapPack(
+	q Querier,
+	gameID, url string,
+	minLng, minLat, maxLng, maxLat *float64,
+) error {
+	_, err := q.Exec(`
+		UPDATE games
+		SET map_pack_url = $1,
+			bbox_min_lng = COALESCE($2, bbox_min_lng),
+			bbox_min_lat = COALESCE($3, bbox_min_lat),
+			bbox_max_lng = COALESCE($4, bbox_max_lng),
+			bbox_max_lat = COALESCE($5, bbox_max_lat)
+		WHERE id = $6
+	`, url, minLng, minLat, maxLng, maxLat, gameID)
+	return err
+}
+
 // --- Sides ---
 
 type SidesRepo struct{ db *sqlx.DB }
