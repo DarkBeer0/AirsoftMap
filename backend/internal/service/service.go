@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -527,17 +528,31 @@ func genCode(n int) (string, error) {
 type MarkerService struct {
 	markers *repository.MarkersRepo
 	members *repository.MembersRepo
+	games   *repository.GamesRepo
+	squads  *repository.SquadsRepo
 }
 
-func NewMarkerService(mk *repository.MarkersRepo, mb *repository.MembersRepo) *MarkerService {
-	return &MarkerService{markers: mk, members: mb}
+func NewMarkerService(
+	mk *repository.MarkersRepo,
+	mb *repository.MembersRepo,
+	g *repository.GamesRepo,
+	sq *repository.SquadsRepo,
+) *MarkerService {
+	return &MarkerService{markers: mk, members: mb, games: g, squads: sq}
 }
 
 // CanSee реализует правила видимости меток. Используется и при GET /markers,
-// и при WS broadcast (фаза 3).
+// и при WS broadcast.
+//
+// Особый случай: автор всегда видит свою метку (даже visibility=organizers),
+// иначе организатор поставит «для других организаторов» и собственная же
+// метка для него пропадёт.
 func (s *MarkerService) CanSee(receiver *model.GameMember, m *model.Marker) bool {
 	if receiver == nil {
 		return false
+	}
+	if receiver.UserID == m.AuthorID {
+		return true
 	}
 	if receiver.Role == model.RoleOrganizer {
 		return true
@@ -546,15 +561,146 @@ func (s *MarkerService) CanSee(receiver *model.GameMember, m *model.Marker) bool
 	case model.VisibilityAll:
 		return true
 	case model.VisibilityOrganizers:
-		return false
+		return false // organizer уже отфильтрован выше
 	case model.VisibilitySide:
 		return m.SideID != nil && receiver.SideID != nil && *m.SideID == *receiver.SideID
 	case model.VisibilitySquad:
 		return m.SquadID != nil && receiver.SquadID != nil && *m.SquadID == *receiver.SquadID
 	case model.VisibilitySelf:
-		return m.AuthorID == receiver.UserID
+		return false // только автор, уже отфильтровано выше
 	}
 	return false
+}
+
+type CreateMarkerInput struct {
+	UserID     string
+	GameID     string
+	Kind       string
+	Visibility model.Visibility
+	Lng        float64
+	Lat        float64
+	Label      *string
+	ExpiresAt  *time.Time
+}
+
+// Create — валидирует автора и его права на visibility, проверяет, что точка
+// внутри bbox игры (если bbox задан — D1), INSERT.
+//
+// Возвращает marker для последующего broadcast хендлером.
+func (s *MarkerService) Create(ctx context.Context, in CreateMarkerInput) (*model.Marker, error) {
+	if in.GameID == "" {
+		return nil, fmt.Errorf("%w: game required", ErrValidation)
+	}
+	kind := strings.TrimSpace(in.Kind)
+	if kind == "" {
+		return nil, fmt.Errorf("%w: kind required", ErrValidation)
+	}
+	if !validVisibility(in.Visibility) {
+		return nil, fmt.Errorf("%w: bad visibility", ErrValidation)
+	}
+	if !validLngLat(in.Lng, in.Lat) {
+		return nil, fmt.Errorf("%w: coords out of range", ErrValidation)
+	}
+
+	db := s.markers.DB()
+
+	author, err := s.members.ByUserAndGame(db, in.UserID, in.GameID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrForbidden
+		}
+		return nil, err
+	}
+
+	// Bbox-проверка: если организатор задал полигон, метки за его пределами
+	// — мисклик/баг карты. Без bbox пропускаем (например, до загрузки тайл-пака).
+	game, err := s.games.ByID(db, in.GameID)
+	if err != nil {
+		return nil, err
+	}
+	if game.BboxMinLng != nil && game.BboxMinLat != nil &&
+		game.BboxMaxLng != nil && game.BboxMaxLat != nil {
+		if in.Lng < *game.BboxMinLng || in.Lng > *game.BboxMaxLng ||
+			in.Lat < *game.BboxMinLat || in.Lat > *game.BboxMaxLat {
+			return nil, fmt.Errorf("%w: marker outside game bbox", ErrValidation)
+		}
+	}
+
+	// visibility=organizers разрешена только organizer'у (иначе боец сможет
+	// слать втихую сообщения в админский слой).
+	if in.Visibility == model.VisibilityOrganizers && author.Role != model.RoleOrganizer {
+		return nil, ErrForbidden
+	}
+
+	// Side/squad подставляем из автора (клиент их не указывает — это серверная
+	// истина: метка «для своей стороны» = стороны автора).
+	m := &model.Marker{
+		ID:         uuid.NewString(),
+		GameID:     in.GameID,
+		AuthorID:   in.UserID,
+		Kind:       kind,
+		Visibility: in.Visibility,
+		Lng:        in.Lng,
+		Lat:        in.Lat,
+		Label:      in.Label,
+		ExpiresAt:  in.ExpiresAt,
+	}
+	if in.Visibility == model.VisibilitySide || in.Visibility == model.VisibilitySquad {
+		m.SideID = author.SideID
+	}
+	if in.Visibility == model.VisibilitySquad {
+		m.SquadID = author.SquadID
+	}
+
+	if err := s.markers.Insert(db, m); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// List — возвращает только видимые текущему userID метки. Не-член игры → 403.
+func (s *MarkerService) List(ctx context.Context, userID, gameID string) ([]model.Marker, error) {
+	if gameID == "" || userID == "" {
+		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
+	}
+	db := s.markers.DB()
+
+	self, err := s.members.ByUserAndGame(db, userID, gameID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrForbidden
+		}
+		return nil, err
+	}
+	all, err := s.markers.ListByGame(db, gameID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]model.Marker, 0, len(all))
+	now := time.Now()
+	for i := range all {
+		m := all[i]
+		if m.ExpiresAt != nil && m.ExpiresAt.Before(now) {
+			continue
+		}
+		if s.CanSee(self, &m) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func validVisibility(v model.Visibility) bool {
+	switch v {
+	case model.VisibilitySelf, model.VisibilitySquad, model.VisibilitySide,
+		model.VisibilityOrganizers, model.VisibilityAll:
+		return true
+	}
+	return false
+}
+
+func validLngLat(lng, lat float64) bool {
+	return lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90
 }
 
 // --- EventService ---

@@ -43,19 +43,20 @@ func main() {
 
 	// Services
 	gameSvc := service.NewGameService(gamesRepo, sidesRepo, squadsRepo, membersRepo)
-	markerSvc := service.NewMarkerService(markersRepo, membersRepo)
+	markerSvc := service.NewMarkerService(markersRepo, membersRepo, gamesRepo, squadsRepo)
 	eventSvc := service.NewEventService(eventsRepo, membersRepo)
 
-	// WS hub
-	hub := wshub.NewHub(membersRepo)
+	// WS hub. markerSvc передаётся как фильтр видимости (плагин-интерфейс,
+	// чтобы хаб не тянул весь service-пакет).
+	hub := wshub.NewHub(membersRepo, markerSvc)
 	go hub.Run()
 
 	// Handlers
 	gameH := handler.NewGameHandler(gameSvc)
 	sideH := handler.NewSideHandler(gameSvc)
 	squadH := handler.NewSquadHandler(gameSvc)
-	memberH := handler.NewMemberHandler(gameSvc)
-	markerH := handler.NewMarkerHandler(markerSvc)
+	memberH := handler.NewMemberHandler(gameSvc, hub)
+	markerH := handler.NewMarkerHandler(markerSvc, hub)
 	eventH := handler.NewEventHandler(eventSvc)
 	wsH := handler.NewWsHandler(hub)
 

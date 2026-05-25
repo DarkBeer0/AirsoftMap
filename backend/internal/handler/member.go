@@ -8,13 +8,17 @@ import (
 
 	"github.com/airsoftmap/backend/internal/middleware"
 	"github.com/airsoftmap/backend/internal/service"
+	wshub "github.com/airsoftmap/backend/internal/websocket"
 )
 
 type MemberHandler struct {
 	svc *service.GameService
+	hub *wshub.Hub
 }
 
-func NewMemberHandler(s *service.GameService) *MemberHandler { return &MemberHandler{svc: s} }
+func NewMemberHandler(s *service.GameService, hub *wshub.Hub) *MemberHandler {
+	return &MemberHandler{svc: s, hub: hub}
+}
 
 type memberDTO struct {
 	ID       string   `json:"id"`
@@ -121,6 +125,12 @@ func (h *MemberHandler) Update(c *gin.Context) {
 		}
 		return
 	}
+	// Сбрасываем кэш в WS-хабе — иначе следующий broadcast будет фильтровать
+	// по старой роли/стороне/статусу.
+	if h.hub != nil {
+		h.hub.InvalidateMember(gameID, updated.UserID)
+	}
+
 	c.JSON(http.StatusOK, memberDTO{
 		ID:       updated.ID,
 		UserID:   updated.UserID,

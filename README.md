@@ -6,7 +6,7 @@
 
 ## Текущий статус
 
-**Фазы 1 и 2 завершены.** Полный flow: организатор создаёт игру → опционально скачивает топо-пачку полигона в MBTiles и заливает в Supabase Storage → раздаёт QR-коды сторон → бойцы сканируют → у всех (включая организатора) на боевой карте показывается локальная топо-карта и собственная позиция. Организатор и командиры сторон распределяют бойцов по отрядам через drag&drop, назначают роли.
+**Фазы 1–3 завершены.** Полный flow: организатор создаёт игру → опционально скачивает топо-пачку полигона в MBTiles и заливает в Supabase Storage → раздаёт QR-коды сторон → бойцы сканируют → у всех (включая организатора) на боевой карте показывается локальная топо-карта, собственная позиция (Kalman-сглаживание + smart-GPS), позиции союзников реал-тайм через WS и метки (с серверной фильтрацией по visibility). Организатор и командиры сторон распределяют бойцов по отрядам через drag&drop, назначают роли.
 
 Что уже работает end-to-end:
 
@@ -19,20 +19,28 @@
   - `GET /api/v1/games/:id/sides` — список сторон (любой член игры)
   - `GET /api/v1/games/:id/squads` — список отрядов всех сторон
   - `POST /api/v1/games/:id/squads` — создать отряд (organizer / side_commander своей стороны)
-  - `PATCH /api/v1/games/:id/members/:uid` — назначение `side_id` / `squad_id` / `role` / `callsign` с проверкой прав: organizer — всё, кроме понижения себя; side_commander — только свою сторону, не может выдать `organizer`-роль; squad должен принадлежать целевой стороне
+  - `PATCH /api/v1/games/:id/members/:uid` — назначение `side_id` / `squad_id` / `role` / `callsign` с проверкой прав: organizer — всё, кроме понижения себя; side_commander — только свою сторону, не может выдать `organizer`-роль; squad должен принадлежать целевой стороне; инвалидирует WS-кэш членства
+  - `POST /api/v1/games/:id/markers` — создать метку с серверной валидацией visibility (organizers-метку имеет право поставить только organizer), проверкой bbox игры (D1) и автоподстановкой side/squad автора; броадкаст в WS с фильтрацией по `MarkerService.CanSee`
+  - `GET /api/v1/games/:id/markers` — список видимых текущему игроку (отфильтрованы истёкшие и недоступные по visibility)
+  - `GET /api/v1/ws?game=...` — WS-хаб с in-memory кэшем `game_members` (warm на connect, инвалидация на assignment-update); правила: organizer видит всё, dead не получает позиций живых, position между членами одной стороны, marker — через CanSee
   - JWT-валидация (HS256) на всех защищённых эндпоинтах
 - **Mobile** (требует локально `flutter pub get` + `dart run build_runner build` + `supabase_config.dart` + Storage bucket `map-packs`):
   - Лобби с QR-сканером (deeplink `airsoftmap://join/<code>`) и ручным вводом → анонимная Supabase-сессия → `POST /games/join` → сохранение в Riverpod-сессии → переход на боевую карту
   - Экран создания игры: имя + 1..8 сторон с палитрой, опциональный switch «Оффлайн-карта» (центр через GPS + slider 0.5–5 км, оценка тайлов и MB с предупреждением >70 MB) → POST → прогресс скачивания тайлов → upload в Supabase Storage → PATCH → QR-коды сторон (`qr_flutter`, deeplink + копирование в буфер)
   - `TileDownloader` с очередью worker-ов на shared iterator, User-Agent, exp-backoff retry, batched INSERT в одной транзакции, MBTiles metadata (bounds/minzoom/maxzoom/attribution)
   - `MbtilesServer` (shelf на loopback) поднимается из боевой карты, MapLibre рендерит raster через `http://127.0.0.1:{port}/tiles/{z}/{x}/{y}.png`; при ошибке оффлайн-пачки — fallback на онлайн OpenTopoMap с баннером
-  - Боевая карта: динамический style (offline/online), нативный GPS-маркер с трекингом и компасом, плашка `сторона / позывной / роль` (organizer — серая точка + имя игры), атрибуция CC-BY-SA, кнопка «УБИТ»
+  - Боевая карта: динамический style (offline/online), нативный GPS-маркер с трекингом и компасом, плашка `сторона / позывной / роль` (organizer — серая точка + имя игры), атрибуция CC-BY-SA, кнопка «УБИТ» → переключение GPS в low-power lock и переход на экран мертвяка
   - GPS-разрешения запрашиваются с retry-баннером при отказе
+  - Полный Kalman-фильтр (gap reset >30с с warmup на 3 чтения, drift detection 6 точек/15м/14м-acc → stationary medium, speed >12 м/с → дроп) + adaptive measurement noise по accuracy
+  - `MotionService` (sensors_plus, акселерометр без g) — гистерезис 0.2/0.6 м/с², пересылка → `GpsService.setMode(battle|stationary)`; dead имеет приоритет
+  - WS-клиент `WsService`: exp-backoff 1→2→4→8→16→30с с jitter, heartbeat ping 25с, watchdog 60с без incoming → forced reconnect; троттлинг позиций 3с; стрим `connectionState` показывается баннером
+  - В боевой карте: WS подключается на входе, входящие `position` → круги союзников (цвет = стороны); long-press по карте → bottom-sheet (тип метки + visibility + label) → POST → broadcast → круги меток. Компас (`flutter_compass`) показывает розу севера в углу
+  - `MarkersApi` — типизированные `MarkerKind` / `MarkerVisibility` + DTO; начальная загрузка через GET, далее обновления через WS
   - `GameSession` (Riverpod) — единая доменная модель для soldier/organizer; `setMapPack` обновляет URL после upload
   - Лобби после join делает фоновый prefetch map-pack через `MapPackCache` (общий для lobby/battle_map/game_create — идемпотентный `ensure(gameId, url)`)
   - Командирский экран `/command`: tabs по сторонам (organizer видит все, side_commander — только свою), карточки отрядов как `DragTarget`, члены как `LongPressDraggable` chips с иконкой роли; tap → ModalBottomSheet с выбором новой роли; кнопка «+ Отряд»; auto-refresh после каждого изменения
 
-Открытые риски (Фаза 3+): WS-хаб дёргает БД на каждый пакет (B1), нет foreground-сервиса для GPS и shelf-сервера (C6/C7), валидация координат внутри bbox (D1), Kalman пока минимальный (C1) — см. рекурсивный анализ в истории планов.
+Открытые риски (Фаза 4+): нет foreground-сервиса для GPS и shelf-сервера (C6/C7) — Android прибьёт WS/shelf при долгом backgrounding; TTS-очередь и шаблоны фраз ещё не сделаны (фаза 4); экран «Убит» пока без маршрута до мертвяка; HUD ближайшей вражеской метки заглушен (фаза 4 при подключении TTS).
 
 ---
 
@@ -327,12 +335,12 @@ airsoftmap/
 
 ### Фаза 3 — Боевая карта + real-time
 
-- [ ] GPS + Kalman (порт из TurfStep)
-- [ ] Компас + азимут до точки
-- [ ] WS-клиент с переподключением
-- [ ] WS-хаб на Go с фильтрацией по сторонам/ролям/статусу
-- [ ] Метки с visibility
-- [ ] Smart-GPS на основе акселерометра
+- [x] GPS + Kalman (порт из TurfStep — gap/drift/speed/adaptive noise)
+- [x] Компас + азимут до точки (`flutter_compass` + `geo.dart` утилиты bearing/cardinal8/distanceMeters)
+- [x] WS-клиент с переподключением (exp-backoff + heartbeat + watchdog)
+- [x] WS-хаб на Go с фильтрацией по сторонам/ролям/статусу (+ in-memory кэш членства)
+- [x] Метки с visibility (backend + mobile UI: long-press → bottom-sheet → POST → broadcast)
+- [x] Smart-GPS на основе акселерометра (`MotionService` → автоматическое переключение режимов)
 
 ### Фаза 4 — Статус «Убит» + аудио
 

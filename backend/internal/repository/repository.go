@@ -256,6 +256,8 @@ type MarkersRepo struct{ db *sqlx.DB }
 
 func NewMarkersRepo(db *sqlx.DB) *MarkersRepo { return &MarkersRepo{db: db} }
 
+func (r *MarkersRepo) DB() *sqlx.DB { return r.db }
+
 func (r *MarkersRepo) Insert(q Querier, m *model.Marker) error {
 	_, err := q.NamedExec(`
 		INSERT INTO markers (
