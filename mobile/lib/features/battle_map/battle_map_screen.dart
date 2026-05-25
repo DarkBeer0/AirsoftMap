@@ -7,8 +7,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/api/markers_api.dart';
+import '../../core/gps/geo.dart';
 import '../../core/gps/gps_provider.dart';
 import '../../core/gps/kalman_filter.dart';
 import '../../core/gps/motion_service.dart';
@@ -16,6 +18,7 @@ import '../../core/map/map_pack_cache.dart';
 import '../../core/map/mbtiles_server.dart';
 import '../../core/session/game_session.dart';
 import '../../core/ws/ws_service.dart';
+import '../voice/tts_service.dart';
 
 /// Боевая карта. Если у сессии есть `mapPackUrl` — скачиваем .mbtiles
 /// (или используем кэшированный), поднимаем локальный shelf-сервер и
@@ -219,8 +222,10 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
         _handleMarker(packet);
         break;
       case 'kill':
+        _speakKill(packet, died: true);
+        break;
       case 'respawn':
-        // фаза 4 — обновляем статус allies / UI.
+        _speakKill(packet, died: false);
         break;
     }
   }
@@ -241,7 +246,71 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
     if (payload == null) return;
     final m = MarkerInfo.fromJson(payload);
     await _upsertMarker(m);
+    _speakMarker(m);
   }
+
+  void _speakMarker(MarkerInfo m) {
+    final tts = ref.read(ttsServiceProvider);
+    final my = _myPos;
+    if (my == null) {
+      // Без своей позиции — без азимута. Всё равно полезно знать, что метка пришла.
+      tts.enqueue(VoiceMessage(
+        'Новая метка: ${_kindToRu(m.kind)}',
+        VoicePriority.tactical,
+      ));
+      return;
+    }
+    final distM = distanceMeters(my.lat, my.lng, m.lat, m.lng);
+    final bearing = bearingDeg(my.lat, my.lng, m.lat, m.lng);
+    tts.enqueue(VoiceMessage(
+      TtsService.formatMarker(
+        kind: _kindToRu(m.kind),
+        distanceM: distM,
+        azimuth: cardinal8(bearing),
+      ),
+      m.kind == 'enemy' ? VoicePriority.tactical : VoicePriority.info,
+    ));
+  }
+
+  void _speakKill(Map<String, dynamic> packet, {required bool died}) {
+    final tts = ref.read(ttsServiceProvider);
+    final session = ref.read(gameSessionProvider);
+    final payload = packet['payload'] as Map<String, dynamic>?;
+    final author = packet['author'] as String?;
+    if (author == null) return;
+
+    // На клиент прилетают только пакеты, которые сервер уже отфильтровал
+    // по правилу «убит/возродился — союзникам и организатору». Здесь только
+    // формулируем фразу.
+    final isMine = session != null && author == _userIdOrEmpty();
+    if (isMine) return; // про самого себя мы и так знаем
+
+    final sideId = payload?['side_id'] as String?;
+    final allied = session != null &&
+        session.sideId != null &&
+        sideId != null &&
+        session.sideId == sideId;
+    final who = allied ? 'Союзник' : 'Боец';
+    final what = died ? 'убит' : 'возродился';
+    tts.enqueue(VoiceMessage('$who $what', VoicePriority.info));
+  }
+
+  String _userIdOrEmpty() {
+    // Supabase user_id — он же author в WS-пакете. Riverpod-провайдера
+    // здесь нет, тащим через супабейзовский синглтон, чтобы не плодить зависимости.
+    // Возвращает '' если сессии нет (тогда _speakKill всё равно никуда не зайдёт).
+    return Supabase.instance.client.auth.currentSession?.user.id ?? '';
+  }
+
+  String _kindToRu(String kind) => switch (kind) {
+        'enemy' => 'противник',
+        'ally' => 'союзник',
+        'danger' => 'опасность',
+        'objective' => 'цель',
+        'support' => 'поддержка',
+        'note' => 'заметка',
+        _ => kind,
+      };
 
   // ─── Map layer mutations ──────────────────────────────────────────────────
 

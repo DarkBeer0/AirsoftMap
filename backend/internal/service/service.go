@@ -57,6 +57,7 @@ type GameService struct {
 	sides   *repository.SidesRepo
 	squads  *repository.SquadsRepo
 	members *repository.MembersRepo
+	spawns  *repository.SpawnPointsRepo
 }
 
 func NewGameService(
@@ -64,8 +65,9 @@ func NewGameService(
 	s *repository.SidesRepo,
 	sq *repository.SquadsRepo,
 	m *repository.MembersRepo,
+	sp *repository.SpawnPointsRepo,
 ) *GameService {
-	return &GameService{games: g, sides: s, squads: sq, members: m}
+	return &GameService{games: g, sides: s, squads: sq, members: m, spawns: sp}
 }
 
 // Create — игра + стороны + organizer-member, всё в одной транзакции.
@@ -690,6 +692,89 @@ func (s *MarkerService) List(ctx context.Context, userID, gameID string) ([]mode
 	return out, nil
 }
 
+// ─── SpawnPoints ───────────────────────────────────────────────────────────
+
+type CreateSpawnPointInput struct {
+	UserID string
+	GameID string
+	SideID *string // nil = общая точка (нейтральная); иначе должна принадлежать игре
+	Name   string
+	Lng    float64
+	Lat    float64
+	IsBase bool
+}
+
+// CreateSpawnPoint — только организатор может ставить точки возрождения.
+// Координаты валидируются по bbox игры (если задан), чтобы избежать опечаток
+// при долгом теребе карты.
+func (s *GameService) CreateSpawnPoint(ctx context.Context, in CreateSpawnPointInput) (*model.SpawnPoint, error) {
+	if strings.TrimSpace(in.Name) == "" {
+		return nil, fmt.Errorf("%w: name required", ErrValidation)
+	}
+	if !validLngLat(in.Lng, in.Lat) {
+		return nil, fmt.Errorf("%w: coords out of range", ErrValidation)
+	}
+	db := s.games.DB()
+
+	caller, err := s.requireMember(db, in.UserID, in.GameID)
+	if err != nil {
+		return nil, err
+	}
+	if caller.Role != model.RoleOrganizer {
+		return nil, ErrForbidden
+	}
+
+	game, err := s.games.ByID(db, in.GameID)
+	if err != nil {
+		return nil, err
+	}
+	if game.BboxMinLng != nil && game.BboxMinLat != nil &&
+		game.BboxMaxLng != nil && game.BboxMaxLat != nil {
+		if in.Lng < *game.BboxMinLng || in.Lng > *game.BboxMaxLng ||
+			in.Lat < *game.BboxMinLat || in.Lat > *game.BboxMaxLat {
+			return nil, fmt.Errorf("%w: spawn outside game bbox", ErrValidation)
+		}
+	}
+
+	if in.SideID != nil && *in.SideID != "" {
+		if _, err := s.sideInGame(db, *in.SideID, in.GameID); err != nil {
+			return nil, err
+		}
+	} else {
+		in.SideID = nil
+	}
+
+	sp := &model.SpawnPoint{
+		ID:     uuid.NewString(),
+		GameID: in.GameID,
+		SideID: in.SideID,
+		Name:   strings.TrimSpace(in.Name),
+		Lng:    in.Lng,
+		Lat:    in.Lat,
+		IsBase: in.IsBase,
+	}
+	if err := s.spawns.Insert(db, sp); err != nil {
+		return nil, err
+	}
+	return sp, nil
+}
+
+// ListSpawnPoints — все точки возрождения игры. Видны любому члену
+// (бойцу из стороны А не вредно знать, где базируется сторона Б, — на
+// реальной игре это и так быстро вычисляется).
+func (s *GameService) ListSpawnPoints(ctx context.Context, userID, gameID string) ([]model.SpawnPoint, error) {
+	if gameID == "" || userID == "" {
+		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
+	}
+	db := s.games.DB()
+	if _, err := s.requireMember(db, userID, gameID); err != nil {
+		return nil, err
+	}
+	return s.spawns.ListByGame(db, gameID)
+}
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
 func validVisibility(v model.Visibility) bool {
 	switch v {
 	case model.VisibilitySelf, model.VisibilitySquad, model.VisibilitySide,
@@ -705,6 +790,10 @@ func validLngLat(lng, lat float64) bool {
 
 // --- EventService ---
 
+// Дефолтный таймер респауна (фаза 5: вынесем в game.respawn_seconds,
+// конфигурируется организатором).
+const DefaultRespawnSeconds = 60
+
 type EventService struct {
 	events  *repository.EventsRepo
 	members *repository.MembersRepo
@@ -714,4 +803,69 @@ func NewEventService(e *repository.EventsRepo, m *repository.MembersRepo) *Event
 	return &EventService{events: e, members: m}
 }
 
-// TODO (фаза 4): Kill, Respawn, Sync (батч).
+type KillResult struct {
+	Member       model.GameMember
+	RespawnUntil time.Time
+}
+
+// Kill — игрок сам помечает себя убитым (нажал «УБИТ» на боевой карте).
+// Сценарий «организатор оживляет вручную» — отдельный путь, не здесь.
+// Возвращает обновлённого члена и время, до которого экран мертвяка тикает.
+func (s *EventService) Kill(ctx context.Context, userID, gameID string) (*KillResult, error) {
+	if userID == "" || gameID == "" {
+		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
+	}
+	db := s.members.DB()
+	m, err := s.members.ByUserAndGame(db, userID, gameID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrForbidden
+		}
+		return nil, err
+	}
+	respawnUntil := time.Now().Add(time.Duration(DefaultRespawnSeconds) * time.Second)
+	if err := s.members.UpdateStatusAndRespawn(db, m.ID, string(model.MemberStatusDead), &respawnUntil); err != nil {
+		return nil, err
+	}
+	// Записываем событие — для отчёта после игры (kill-feed, статистика).
+	_ = s.events.Insert(db, &model.Event{
+		ID:         uuid.NewString(),
+		GameID:     gameID,
+		UserID:     userID,
+		Type:       "kill",
+		OccurredAt: time.Now(),
+	})
+	m.Status = model.MemberStatusDead
+	m.RespawnUntil = &respawnUntil
+	return &KillResult{Member: *m, RespawnUntil: respawnUntil}, nil
+}
+
+// Respawn — игрок отметил, что добрался до мертвяка / таймер истёк.
+// Клиент может вызвать раньше respawn_until (например, организатор сказал
+// «возвращайся сразу») — это допустимо, статус считается на стороне организатора.
+func (s *EventService) Respawn(ctx context.Context, userID, gameID string) (*model.GameMember, error) {
+	if userID == "" || gameID == "" {
+		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
+	}
+	db := s.members.DB()
+	m, err := s.members.ByUserAndGame(db, userID, gameID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, ErrForbidden
+		}
+		return nil, err
+	}
+	if err := s.members.UpdateStatusAndRespawn(db, m.ID, string(model.MemberStatusAlive), nil); err != nil {
+		return nil, err
+	}
+	_ = s.events.Insert(db, &model.Event{
+		ID:         uuid.NewString(),
+		GameID:     gameID,
+		UserID:     userID,
+		Type:       "respawn",
+		OccurredAt: time.Now(),
+	})
+	m.Status = model.MemberStatusAlive
+	m.RespawnUntil = nil
+	return m, nil
+}

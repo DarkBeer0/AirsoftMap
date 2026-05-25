@@ -6,7 +6,7 @@
 
 ## Текущий статус
 
-**Фазы 1–3 завершены.** Полный flow: организатор создаёт игру → опционально скачивает топо-пачку полигона в MBTiles и заливает в Supabase Storage → раздаёт QR-коды сторон → бойцы сканируют → у всех (включая организатора) на боевой карте показывается локальная топо-карта, собственная позиция (Kalman-сглаживание + smart-GPS), позиции союзников реал-тайм через WS и метки (с серверной фильтрацией по visibility). Организатор и командиры сторон распределяют бойцов по отрядам через drag&drop, назначают роли.
+**Фазы 1–4 завершены.** Полный flow: организатор создаёт игру → опционально скачивает топо-пачку полигона в MBTiles и заливает в Supabase Storage → раздаёт QR-коды сторон → бойцы сканируют → у всех (включая организатора) на боевой карте показывается локальная топо-карта, собственная позиция (Kalman-сглаживание + smart-GPS), позиции союзников реал-тайм через WS и метки (с серверной фильтрацией по visibility). Организатор и командиры сторон распределяют бойцов по отрядам через drag&drop. При нажатии «УБИТ» — экран мертвяка с таймером респауна, стрелкой азимута до ближайшей точки возрождения и системным TTS «Убит. Двигайся к мертвяку». Новые метки союзников озвучиваются голосом с дистанцией и кардиналом («Новая метка: противник, 120 метров, СВ»).
 
 Что уже работает end-to-end:
 
@@ -22,7 +22,10 @@
   - `PATCH /api/v1/games/:id/members/:uid` — назначение `side_id` / `squad_id` / `role` / `callsign` с проверкой прав: organizer — всё, кроме понижения себя; side_commander — только свою сторону, не может выдать `organizer`-роль; squad должен принадлежать целевой стороне; инвалидирует WS-кэш членства
   - `POST /api/v1/games/:id/markers` — создать метку с серверной валидацией visibility (organizers-метку имеет право поставить только organizer), проверкой bbox игры (D1) и автоподстановкой side/squad автора; броадкаст в WS с фильтрацией по `MarkerService.CanSee`
   - `GET /api/v1/games/:id/markers` — список видимых текущему игроку (отфильтрованы истёкшие и недоступные по visibility)
-  - `GET /api/v1/ws?game=...` — WS-хаб с in-memory кэшем `game_members` (warm на connect, инвалидация на assignment-update); правила: organizer видит всё, dead не получает позиций живых, position между членами одной стороны, marker — через CanSee
+  - `POST /api/v1/games/:id/spawn-points` — поставить точку возрождения (organizer-only, bbox-валидация); `GET` — список (любой член игры)
+  - `POST /api/v1/games/:id/kills` — игрок отметил себя убитым: status=dead, respawn_until=now+60с, event-запись, WS-broadcast `kill` союзникам, инвалидация member-кэша
+  - `POST /api/v1/games/:id/respawn` — снять статус мёртвого после таймера: status=alive, event, WS-broadcast `respawn`
+  - `GET /api/v1/ws?game=...` — WS-хаб с in-memory кэшем `game_members` (warm на connect, инвалидация на assignment-update и kill/respawn); правила: organizer видит всё, dead не получает позиций живых, position между членами одной стороны, marker — через CanSee, kill/respawn — союзникам
   - JWT-валидация (HS256) на всех защищённых эндпоинтах
 - **Mobile** (требует локально `flutter pub get` + `dart run build_runner build` + `supabase_config.dart` + Storage bucket `map-packs`):
   - Лобби с QR-сканером (deeplink `airsoftmap://join/<code>`) и ручным вводом → анонимная Supabase-сессия → `POST /games/join` → сохранение в Riverpod-сессии → переход на боевую карту
@@ -36,11 +39,14 @@
   - WS-клиент `WsService`: exp-backoff 1→2→4→8→16→30с с jitter, heartbeat ping 25с, watchdog 60с без incoming → forced reconnect; троттлинг позиций 3с; стрим `connectionState` показывается баннером
   - В боевой карте: WS подключается на входе, входящие `position` → круги союзников (цвет = стороны); long-press по карте → bottom-sheet (тип метки + visibility + label) → POST → broadcast → круги меток. Компас (`flutter_compass`) показывает розу севера в углу
   - `MarkersApi` — типизированные `MarkerKind` / `MarkerVisibility` + DTO; начальная загрузка через GET, далее обновления через WS
+  - `EventsApi` — POST /kills, POST /respawn, GET/POST /spawn-points (типизированные DTO `KillResult` / `SpawnPointInfo`)
+  - `TtsService` (`flutter_tts`, ru-RU): очередь с приоритетами `critical | tactical | info`, инициализация в `main` через `ProviderContainer`. На входящий WS-marker (от союзника) клиент формирует фразу `Новая метка: <тип>, <дистанция>, <кардинал>` (или без азимута, если своя позиция ещё не получена). На kill/respawn — `Союзник убит / возродился`. Свои события не озвучиваются
+  - Экран `/dead`: при входе POST /kills → `GpsService.markDead()` → подгрузка spawn-points → выбор ближайшего к моей стороне (или общего, side_id == null) → крутящаяся стрелка азимута (компас минус bearing), под ней дистанция + кардинал. Таймер обратного отсчёта из respawn_until сервера; при потере связи — локальный 60-секундный fallback с пометкой. По кнопке/таймеру → POST /respawn → `markAlive()` → `/battle`. Критические TTS-фразы прерывают очередь
   - `GameSession` (Riverpod) — единая доменная модель для soldier/organizer; `setMapPack` обновляет URL после upload
   - Лобби после join делает фоновый prefetch map-pack через `MapPackCache` (общий для lobby/battle_map/game_create — идемпотентный `ensure(gameId, url)`)
   - Командирский экран `/command`: tabs по сторонам (organizer видит все, side_commander — только свою), карточки отрядов как `DragTarget`, члены как `LongPressDraggable` chips с иконкой роли; tap → ModalBottomSheet с выбором новой роли; кнопка «+ Отряд»; auto-refresh после каждого изменения
 
-Открытые риски (Фаза 4+): нет foreground-сервиса для GPS и shelf-сервера (C6/C7) — Android прибьёт WS/shelf при долгом backgrounding; TTS-очередь и шаблоны фраз ещё не сделаны (фаза 4); экран «Убит» пока без маршрута до мертвяка; HUD ближайшей вражеской метки заглушен (фаза 4 при подключении TTS).
+Открытые риски (Фаза 5): нет foreground-сервиса для GPS и shelf-сервера (C6/C7) — Android прибьёт WS/shelf при долгом backgrounding; нет батч-синхронизации событий при отсутствии связи (kill/respawn пока теряются, если сервер недоступен); таймер респауна (60с) хардкоден — фаза 5 вынесет в game.respawn_seconds; UI для постановки spawn-points (organizer кладёт их через POST, через UI пока нет — фаза 5 добавит long-press опцию «точка возрождения» рядом с метками).
 
 ---
 
@@ -344,11 +350,11 @@ airsoftmap/
 
 ### Фаза 4 — Статус «Убит» + аудио
 
-- [ ] Экран «Убит» с маршрутом до ближайшего мертвяка
-- [ ] Серверная фильтрация: dead → не шлём позиции врагов
-- [ ] `flutter_tts` с очередью приоритетов
-- [ ] Шаблоны фраз для событий
-- [ ] Hands-free режим (экран гаснет, голос работает)
+- [x] Экран «Убит» с маршрутом до ближайшего мертвяка (стрелка-компас + дистанция + таймер, fallback при потере связи)
+- [x] Серверная фильтрация: dead → не шлём позиции врагов (в WS-хабе через member-кэш)
+- [x] `flutter_tts` с очередью приоритетов (critical/tactical/info, critical прерывает текущее)
+- [x] Шаблоны фраз для событий (markers / kill / respawn / убит-критикал)
+- [ ] Hands-free режим (экран гаснет, голос работает) — нужен foreground-service, в Фазе 5
 
 ### Фаза 5 — Полировка и публикация
 

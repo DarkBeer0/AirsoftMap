@@ -3,6 +3,7 @@ package repository
 import (
 	"database/sql"
 	"errors"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 
@@ -222,6 +223,19 @@ func (r *MembersRepo) UpdateStatus(q Querier, id string, status string) error {
 	return err
 }
 
+// UpdateStatusAndRespawn — атомарно меняет статус и respawn_until.
+// Передача nil в respawnUntil очищает значение (alive после респауна).
+func (r *MembersRepo) UpdateStatusAndRespawn(
+	q Querier, id, status string, respawnUntil *time.Time,
+) error {
+	_, err := q.Exec(`
+		UPDATE game_members
+		SET status = $1, respawn_until = $2
+		WHERE id = $3
+	`, status, respawnUntil, id)
+	return err
+}
+
 // UpdateAssignment — изменить сторону / отряд / роль / позывной.
 // nil-поля сохраняют текущие значения (COALESCE).
 func (r *MembersRepo) UpdateAssignment(
@@ -248,6 +262,30 @@ func (r *MembersRepo) UpdatePosition(q Querier, userID, gameID string, lng, lat 
 		WHERE user_id = $3 AND game_id = $4
 	`, lng, lat, userID, gameID)
 	return err
+}
+
+// --- SpawnPoints ---
+
+type SpawnPointsRepo struct{ db *sqlx.DB }
+
+func NewSpawnPointsRepo(db *sqlx.DB) *SpawnPointsRepo { return &SpawnPointsRepo{db: db} }
+
+func (r *SpawnPointsRepo) DB() *sqlx.DB { return r.db }
+
+func (r *SpawnPointsRepo) Insert(q Querier, s *model.SpawnPoint) error {
+	_, err := q.NamedExec(`
+		INSERT INTO spawn_points (id, game_id, side_id, name, lng, lat, is_base)
+		VALUES (:id, :game_id, :side_id, :name, :lng, :lat, :is_base)
+	`, s)
+	return err
+}
+
+func (r *SpawnPointsRepo) ListByGame(q Querier, gameID string) ([]model.SpawnPoint, error) {
+	var out []model.SpawnPoint
+	if err := q.Select(&out, `SELECT * FROM spawn_points WHERE game_id = $1 ORDER BY name`, gameID); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // --- Markers ---

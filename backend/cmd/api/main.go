@@ -40,9 +40,10 @@ func main() {
 	membersRepo := repository.NewMembersRepo(db)
 	markersRepo := repository.NewMarkersRepo(db)
 	eventsRepo := repository.NewEventsRepo(db)
+	spawnsRepo := repository.NewSpawnPointsRepo(db)
 
 	// Services
-	gameSvc := service.NewGameService(gamesRepo, sidesRepo, squadsRepo, membersRepo)
+	gameSvc := service.NewGameService(gamesRepo, sidesRepo, squadsRepo, membersRepo, spawnsRepo)
 	markerSvc := service.NewMarkerService(markersRepo, membersRepo, gamesRepo, squadsRepo)
 	eventSvc := service.NewEventService(eventsRepo, membersRepo)
 
@@ -57,7 +58,8 @@ func main() {
 	squadH := handler.NewSquadHandler(gameSvc)
 	memberH := handler.NewMemberHandler(gameSvc, hub)
 	markerH := handler.NewMarkerHandler(markerSvc, hub)
-	eventH := handler.NewEventHandler(eventSvc)
+	spawnH := handler.NewSpawnHandler(gameSvc)
+	eventH := handler.NewEventHandler(eventSvc, hub)
 	wsH := handler.NewWsHandler(hub)
 
 	// Router
@@ -86,6 +88,8 @@ func main() {
 		priv.PATCH("/games/:id/members/:uid", memberH.Update)
 		priv.POST("/games/:id/markers", markerH.Create)
 		priv.GET("/games/:id/markers", markerH.List)
+		priv.POST("/games/:id/spawn-points", spawnH.Create)
+		priv.GET("/games/:id/spawn-points", spawnH.List)
 		priv.POST("/games/:id/kills", eventH.Kill)
 		priv.POST("/games/:id/respawn", eventH.Respawn)
 		priv.GET("/ws", wsH.Connect)
