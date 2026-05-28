@@ -45,7 +45,7 @@ func main() {
 	// Services
 	gameSvc := service.NewGameService(gamesRepo, sidesRepo, squadsRepo, membersRepo, spawnsRepo)
 	markerSvc := service.NewMarkerService(markersRepo, membersRepo, gamesRepo, squadsRepo)
-	eventSvc := service.NewEventService(eventsRepo, membersRepo)
+	eventSvc := service.NewEventService(eventsRepo, membersRepo, gamesRepo)
 
 	// WS hub. markerSvc передаётся как фильтр видимости (плагин-интерфейс,
 	// чтобы хаб не тянул весь service-пакет).

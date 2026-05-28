@@ -161,6 +161,7 @@ class GamesApi {
     double? bboxMinLat,
     double? bboxMaxLng,
     double? bboxMaxLat,
+    int? respawnSeconds,
   }) async {
     final res = await _dio.post('/games', data: {
       'name': name,
@@ -169,6 +170,7 @@ class GamesApi {
       if (bboxMinLat != null) 'bbox_min_lat': bboxMinLat,
       if (bboxMaxLng != null) 'bbox_max_lng': bboxMaxLng,
       if (bboxMaxLat != null) 'bbox_max_lat': bboxMaxLat,
+      if (respawnSeconds != null) 'respawn_seconds': respawnSeconds,
     });
     return CreatedGame.fromJson(res.data as Map<String, dynamic>);
   }

@@ -46,9 +46,10 @@ type Game struct {
 	BboxMinLat  *float64   `db:"bbox_min_lat" json:"bbox_min_lat,omitempty"`
 	BboxMaxLng  *float64   `db:"bbox_max_lng" json:"bbox_max_lng,omitempty"`
 	BboxMaxLat  *float64   `db:"bbox_max_lat" json:"bbox_max_lat,omitempty"`
-	MapPackURL  *string    `db:"map_pack_url" json:"map_pack_url,omitempty"`
-	Status      GameStatus `db:"status"       json:"status"`
-	CreatedAt   time.Time  `db:"created_at"   json:"created_at"`
+	MapPackURL     *string    `db:"map_pack_url"    json:"map_pack_url,omitempty"`
+	RespawnSeconds int        `db:"respawn_seconds" json:"respawn_seconds"`
+	Status         GameStatus `db:"status"          json:"status"`
+	CreatedAt      time.Time  `db:"created_at"      json:"created_at"`
 }
 
 type Side struct {

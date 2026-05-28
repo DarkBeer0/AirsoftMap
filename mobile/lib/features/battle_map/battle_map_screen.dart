@@ -9,6 +9,8 @@ import 'package:go_router/go_router.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/api/events_api.dart';
+import '../../core/api/games_api.dart';
 import '../../core/api/markers_api.dart';
 import '../../core/gps/geo.dart';
 import '../../core/gps/gps_provider.dart';
@@ -82,6 +84,10 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
   final Map<String, _AllyVisual> _allies = {};
   // markerID → визуал.
   final Map<String, _MarkerVisual> _markers = {};
+  // spawnID → визуал.
+  final Map<String, _SpawnVisual> _spawns = {};
+  // Стороны игры — для дропдауна при постановке точки возрождения (organizer).
+  List<SideInfo> _sides = const [];
 
   @override
   void initState() {
@@ -133,6 +139,14 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
     } catch (_) {/* банер reconnect покажет состояние */}
 
     await _refreshMarkersFromBackend();
+    await _refreshSpawnsFromBackend();
+
+    // Список сторон нужен только организатору (для постановки spawn-points).
+    if (session.isOrganizer) {
+      try {
+        _sides = await ref.read(gamesApiProvider).listSides(session.gameId);
+      } catch (_) {/* поставит без стороны */}
+    }
   }
 
   Future<void> _loadMap() async {
@@ -199,6 +213,18 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
         await _upsertMarker(m);
       }
     } catch (_) {/* нет интернета — оффлайн всё равно работает */}
+  }
+
+  Future<void> _refreshSpawnsFromBackend() async {
+    final session = ref.read(gameSessionProvider);
+    if (session == null) return;
+    try {
+      final items =
+          await ref.read(eventsApiProvider).listSpawnPoints(session.gameId);
+      for (final sp in items) {
+        await _upsertSpawn(sp);
+      }
+    } catch (_) {/* не критично */}
   }
 
   void _onMyPosition(KalmanPoint p) {
@@ -368,12 +394,70 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
     _markers[m.id] = _MarkerVisual(circle: circle, label: label);
   }
 
+  Future<void> _upsertSpawn(SpawnPointInfo sp) async {
+    if (!_mapReady || _map == null) return;
+    final pos = LatLng(sp.lat, sp.lng);
+    // Цвет точки = цвет стороны (если привязана), иначе нейтральный белый.
+    final side = _sideById(sp.sideId);
+    final color = _parseHexColor(side?.color) ?? Colors.white;
+    final hex = '#${color.value.toRadixString(16).padLeft(8, '0').substring(2)}';
+
+    final existing = _spawns[sp.id];
+    if (existing != null) {
+      await _map!.updateCircle(existing.circle, CircleOptions(geometry: pos));
+      return;
+    }
+    // Кольцо + подпись-флаг. Радиус крупнее меток — это «дом», его видно издали.
+    final circle = await _map!.addCircle(CircleOptions(
+      geometry: pos,
+      circleRadius: 12,
+      circleColor: hex,
+      circleOpacity: 0.25,
+      circleStrokeColor: hex,
+      circleStrokeWidth: 3,
+    ));
+    final label = await _map!.addSymbol(SymbolOptions(
+      geometry: pos,
+      textField: '⚑ ${sp.name}',
+      textOffset: const Offset(0, 1.6),
+      textSize: 12,
+      textColor: '#FFFFFF',
+      textHaloColor: '#000000',
+      textHaloWidth: 1.4,
+    ));
+    _spawns[sp.id] = _SpawnVisual(circle: circle, label: label);
+  }
+
+  SideInfo? _sideById(String? id) {
+    if (id == null) return null;
+    for (final s in _sides) {
+      if (s.id == id) return s;
+    }
+    return null;
+  }
+
   // ─── User actions ─────────────────────────────────────────────────────────
 
   Future<void> _onMapLongClick(Point<double> point, LatLng coord) async {
     final session = ref.read(gameSessionProvider);
     if (session == null) return;
 
+    // Организатор сначала выбирает, что ставит: метку или точку возрождения.
+    if (session.isOrganizer) {
+      final choice = await showModalBottomSheet<_LongPressChoice>(
+        context: context,
+        builder: (_) => const _LongPressChoiceSheet(),
+      );
+      if (choice == null) return;
+      if (choice == _LongPressChoice.spawn) {
+        await _createSpawn(coord);
+        return;
+      }
+    }
+    await _createMarker(coord, session);
+  }
+
+  Future<void> _createMarker(LatLng coord, GameSession session) async {
     final result = await showModalBottomSheet<_MarkerDraft>(
       context: context,
       isScrollControlled: true,
@@ -395,6 +479,35 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Не удалось создать метку: $e')),
+      );
+    }
+  }
+
+  Future<void> _createSpawn(LatLng coord) async {
+    final session = ref.read(gameSessionProvider);
+    if (session == null) return;
+
+    final draft = await showModalBottomSheet<_SpawnDraft>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _SpawnSheet(sides: _sides),
+    );
+    if (draft == null) return;
+
+    try {
+      final created = await ref.read(eventsApiProvider).createSpawnPoint(
+            session.gameId,
+            sideId: draft.sideId,
+            name: draft.name,
+            lng: coord.longitude,
+            lat: coord.latitude,
+            isBase: draft.isBase,
+          );
+      await _upsertSpawn(created);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Не удалось создать точку: $e')),
       );
     }
   }
@@ -446,14 +559,13 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
             onMapCreated: (c) => _map = c,
             onStyleLoadedCallback: () async {
               _mapReady = true;
-              // Применяем уже принятые ws-обновления к карте.
-              for (final entry in _markers.entries.toList()) {
-                _markers.remove(entry.key);
-              }
-              for (final id in _allies.keys.toList()) {
-                _allies.remove(id);
-              }
+              // Стиль пересоздаёт слои аннотаций — старые хэндлы инвалидны,
+              // чистим карты визуалов и перезаливаем из бэкенда.
+              _markers.clear();
+              _allies.clear();
+              _spawns.clear();
               await _refreshMarkersFromBackend();
+              await _refreshSpawnsFromBackend();
             },
             onMapLongClick: _onMapLongClick,
           ),
@@ -834,6 +946,145 @@ class _MarkerSheetState extends State<_MarkerSheet> {
       };
 }
 
+// ─── Long-press choice (organizer) ──────────────────────────────────────────
+
+enum _LongPressChoice { marker, spawn }
+
+class _LongPressChoiceSheet extends StatelessWidget {
+  const _LongPressChoiceSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ListTile(
+            leading: const Icon(Icons.add_location_alt, color: Colors.orange),
+            title: const Text('Метка'),
+            subtitle: const Text('Противник, цель, опасность…'),
+            onTap: () => Navigator.pop(context, _LongPressChoice.marker),
+          ),
+          ListTile(
+            leading: const Icon(Icons.flag, color: Colors.greenAccent),
+            title: const Text('Точка возрождения'),
+            subtitle: const Text('Мертвяк / база стороны'),
+            onTap: () => Navigator.pop(context, _LongPressChoice.spawn),
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Spawn creation sheet ───────────────────────────────────────────────────
+
+class _SpawnDraft {
+  final String name;
+  final String? sideId;
+  final bool isBase;
+  _SpawnDraft({required this.name, this.sideId, required this.isBase});
+}
+
+class _SpawnSheet extends StatefulWidget {
+  final List<SideInfo> sides;
+  const _SpawnSheet({required this.sides});
+
+  @override
+  State<_SpawnSheet> createState() => _SpawnSheetState();
+}
+
+class _SpawnSheetState extends State<_SpawnSheet> {
+  final _name = TextEditingController(text: 'Мертвяк');
+  String? _sideId; // null = нейтральная (общая) точка
+  bool _isBase = false;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16, right: 16, top: 16,
+        bottom: 16 + MediaQuery.of(context).viewInsets.bottom,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Точка возрождения',
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _name,
+            decoration: const InputDecoration(
+              labelText: 'Название',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            maxLength: 40,
+          ),
+          const SizedBox(height: 4),
+          DropdownButtonFormField<String?>(
+            initialValue: _sideId,
+            decoration: const InputDecoration(
+              labelText: 'Сторона',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: [
+              const DropdownMenuItem<String?>(
+                value: null,
+                child: Text('Нейтральная (общая)'),
+              ),
+              ...widget.sides.map((s) => DropdownMenuItem<String?>(
+                    value: s.id,
+                    child: Text(s.name),
+                  )),
+            ],
+            onChanged: (v) => setState(() => _sideId = v),
+          ),
+          const SizedBox(height: 4),
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            value: _isBase,
+            onChanged: (v) => setState(() => _isBase = v ?? false),
+            title: const Text('Это база стороны'),
+            subtitle: const Text('База — главная точка, не просто мертвяк'),
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Отмена'),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                icon: const Icon(Icons.flag),
+                label: const Text('Поставить'),
+                onPressed: () {
+                  final name = _name.text.trim();
+                  if (name.isEmpty) return;
+                  Navigator.pop(
+                    context,
+                    _SpawnDraft(name: name, sideId: _sideId, isBase: _isBase),
+                  );
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 class _AllyVisual {
@@ -845,6 +1096,12 @@ class _MarkerVisual {
   final Circle circle;
   final Symbol? label;
   _MarkerVisual({required this.circle, this.label});
+}
+
+class _SpawnVisual {
+  final Circle circle;
+  final Symbol label;
+  _SpawnVisual({required this.circle, required this.label});
 }
 
 Color? _parseHexColor(String? hex) {

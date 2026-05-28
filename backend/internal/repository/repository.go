@@ -35,11 +35,11 @@ func (r *GamesRepo) Insert(q Querier, g *model.Game) error {
 		INSERT INTO games (
 			id, organizer_id, name, join_code,
 			bbox_min_lng, bbox_min_lat, bbox_max_lng, bbox_max_lat,
-			status
+			respawn_seconds, status
 		) VALUES (
 			:id, :organizer_id, :name, :join_code,
 			:bbox_min_lng, :bbox_min_lat, :bbox_max_lng, :bbox_max_lat,
-			:status
+			:respawn_seconds, :status
 		)
 	`, g)
 	return err

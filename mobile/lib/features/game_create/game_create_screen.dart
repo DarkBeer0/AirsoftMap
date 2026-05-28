@@ -67,6 +67,9 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
   double _sizeKm = 2.0;
   String? _locationError;
 
+  // Время респауна (сек). Шаг 15с, 30..300.
+  double _respawnSeconds = 60;
+
   // Прогресс шага downloading.
   String _progressLabel = '';
   double? _progressValue; // null → indeterminate
@@ -150,6 +153,8 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
           ..._sides.asMap().entries.map((e) => _buildSideRow(e.key, e.value)),
           const SizedBox(height: 16),
           _buildOfflineMapBlock(tiles, bytes, tooBig),
+          const SizedBox(height: 16),
+          _buildRespawnBlock(),
           const SizedBox(height: 24),
           FilledButton(
             onPressed: canSubmit ? _submit : null,
@@ -210,6 +215,48 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
               onPressed: () => _removeSide(index),
             ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildRespawnBlock() {
+    final secs = _respawnSeconds.round();
+    final label = secs >= 60
+        ? '${secs ~/ 60} мин${secs % 60 != 0 ? " ${secs % 60} с" : ""}'
+        : '$secs с';
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text('Время респауна',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 2),
+            const Text(
+              'Сколько боец ждёт после «Убит», прежде чем сможет возродиться',
+              style: TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: Slider(
+                    value: _respawnSeconds,
+                    min: 30,
+                    max: 300,
+                    divisions: 18, // шаг 15с
+                    label: label,
+                    onChanged: (v) => setState(() => _respawnSeconds = v),
+                  ),
+                ),
+                SizedBox(
+                  width: 72,
+                  child: Text(label, textAlign: TextAlign.right),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -406,6 +453,7 @@ class _GameCreateScreenState extends ConsumerState<GameCreateScreen> {
             bboxMinLat: bbox?.minLat,
             bboxMaxLng: bbox?.maxLng,
             bboxMaxLat: bbox?.maxLat,
+            respawnSeconds: _respawnSeconds.round(),
           );
 
       ref.read(gameSessionProvider.notifier).setForOrganizer(game);

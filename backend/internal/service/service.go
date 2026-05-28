@@ -30,13 +30,14 @@ type SideInput struct {
 }
 
 type CreateGameInput struct {
-	Name        string
-	OrganizerID string
-	Sides       []SideInput
-	BboxMinLng  *float64
-	BboxMinLat  *float64
-	BboxMaxLng  *float64
-	BboxMaxLat  *float64
+	Name           string
+	OrganizerID    string
+	Sides          []SideInput
+	BboxMinLng     *float64
+	BboxMinLat     *float64
+	BboxMaxLng     *float64
+	BboxMaxLat     *float64
+	RespawnSeconds int // 0 → дефолт DefaultRespawnSeconds
 }
 
 type GameWithSides struct {
@@ -99,17 +100,23 @@ func (s *GameService) Create(ctx context.Context, in CreateGameInput) (*GameWith
 		return nil, err
 	}
 
+	respawn := in.RespawnSeconds
+	if respawn <= 0 {
+		respawn = DefaultRespawnSeconds
+	}
+
 	gameID := uuid.NewString()
 	g := &model.Game{
-		ID:          gameID,
-		OrganizerID: in.OrganizerID,
-		Name:        strings.TrimSpace(in.Name),
-		JoinCode:    gameCode,
-		BboxMinLng:  in.BboxMinLng,
-		BboxMinLat:  in.BboxMinLat,
-		BboxMaxLng:  in.BboxMaxLng,
-		BboxMaxLat:  in.BboxMaxLat,
-		Status:      model.GameStatusLobby,
+		ID:             gameID,
+		OrganizerID:    in.OrganizerID,
+		Name:           strings.TrimSpace(in.Name),
+		JoinCode:       gameCode,
+		BboxMinLng:     in.BboxMinLng,
+		BboxMinLat:     in.BboxMinLat,
+		BboxMaxLng:     in.BboxMaxLng,
+		BboxMaxLat:     in.BboxMaxLat,
+		RespawnSeconds: respawn,
+		Status:         model.GameStatusLobby,
 	}
 	if err := s.games.Insert(tx, g); err != nil {
 		return nil, fmt.Errorf("insert game: %w", err)
@@ -797,10 +804,15 @@ const DefaultRespawnSeconds = 60
 type EventService struct {
 	events  *repository.EventsRepo
 	members *repository.MembersRepo
+	games   *repository.GamesRepo
 }
 
-func NewEventService(e *repository.EventsRepo, m *repository.MembersRepo) *EventService {
-	return &EventService{events: e, members: m}
+func NewEventService(
+	e *repository.EventsRepo,
+	m *repository.MembersRepo,
+	g *repository.GamesRepo,
+) *EventService {
+	return &EventService{events: e, members: m, games: g}
 }
 
 type KillResult struct {
@@ -823,7 +835,11 @@ func (s *EventService) Kill(ctx context.Context, userID, gameID string) (*KillRe
 		}
 		return nil, err
 	}
-	respawnUntil := time.Now().Add(time.Duration(DefaultRespawnSeconds) * time.Second)
+	secs := DefaultRespawnSeconds
+	if g, err := s.games.ByID(db, gameID); err == nil && g.RespawnSeconds > 0 {
+		secs = g.RespawnSeconds
+	}
+	respawnUntil := time.Now().Add(time.Duration(secs) * time.Second)
 	if err := s.members.UpdateStatusAndRespawn(db, m.ID, string(model.MemberStatusDead), &respawnUntil); err != nil {
 		return nil, err
 	}

@@ -24,12 +24,13 @@ type createGameSideDTO struct {
 }
 
 type createGameRequest struct {
-	Name       string              `json:"name"  binding:"required,min=1,max=80"`
-	Sides      []createGameSideDTO `json:"sides" binding:"required,min=1,max=8,dive"`
-	BboxMinLng *float64            `json:"bbox_min_lng,omitempty"`
-	BboxMinLat *float64            `json:"bbox_min_lat,omitempty"`
-	BboxMaxLng *float64            `json:"bbox_max_lng,omitempty"`
-	BboxMaxLat *float64            `json:"bbox_max_lat,omitempty"`
+	Name           string              `json:"name"  binding:"required,min=1,max=80"`
+	Sides          []createGameSideDTO `json:"sides" binding:"required,min=1,max=8,dive"`
+	BboxMinLng     *float64            `json:"bbox_min_lng,omitempty"`
+	BboxMinLat     *float64            `json:"bbox_min_lat,omitempty"`
+	BboxMaxLng     *float64            `json:"bbox_max_lng,omitempty"`
+	BboxMaxLat     *float64            `json:"bbox_max_lat,omitempty"`
+	RespawnSeconds int                 `json:"respawn_seconds,omitempty" binding:"omitempty,min=10,max=900"`
 }
 
 type sideDTO struct {
@@ -65,13 +66,14 @@ func (h *GameHandler) Create(c *gin.Context) {
 	}
 
 	res, err := h.svc.Create(c.Request.Context(), service.CreateGameInput{
-		Name:        req.Name,
-		OrganizerID: userID,
-		Sides:       sides,
-		BboxMinLng:  req.BboxMinLng,
-		BboxMinLat:  req.BboxMinLat,
-		BboxMaxLng:  req.BboxMaxLng,
-		BboxMaxLat:  req.BboxMaxLat,
+		Name:           req.Name,
+		OrganizerID:    userID,
+		Sides:          sides,
+		BboxMinLng:     req.BboxMinLng,
+		BboxMinLat:     req.BboxMinLat,
+		BboxMaxLng:     req.BboxMaxLng,
+		BboxMaxLat:     req.BboxMaxLat,
+		RespawnSeconds: req.RespawnSeconds,
 	})
 	if err != nil {
 		if errors.Is(err, service.ErrValidation) {
