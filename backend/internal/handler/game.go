@@ -41,11 +41,12 @@ type sideDTO struct {
 }
 
 type createGameResponse struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	JoinCode string    `json:"join_code"`
-	Status   string    `json:"status"`
-	Sides    []sideDTO `json:"sides"`
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	JoinCode       string    `json:"join_code"`
+	Status         string    `json:"status"`
+	RespawnSeconds int       `json:"respawn_seconds"`
+	Sides          []sideDTO `json:"sides"`
 }
 
 func (h *GameHandler) Create(c *gin.Context) {
@@ -85,11 +86,12 @@ func (h *GameHandler) Create(c *gin.Context) {
 	}
 
 	resp := createGameResponse{
-		ID:       res.Game.ID,
-		Name:     res.Game.Name,
-		JoinCode: res.Game.JoinCode,
-		Status:   string(res.Game.Status),
-		Sides:    make([]sideDTO, 0, len(res.Sides)),
+		ID:             res.Game.ID,
+		Name:           res.Game.Name,
+		JoinCode:       res.Game.JoinCode,
+		Status:         string(res.Game.Status),
+		RespawnSeconds: res.Game.RespawnSeconds,
+		Sides:          make([]sideDTO, 0, len(res.Sides)),
 	}
 	for _, s := range res.Sides {
 		resp.Sides = append(resp.Sides, sideDTO{
@@ -107,14 +109,15 @@ type joinRequest struct {
 }
 
 type joinResponse struct {
-	GameID     string  `json:"game_id"`
-	GameName   string  `json:"game_name"`
-	SideID     string  `json:"side_id"`
-	SideName   string  `json:"side_name"`
-	SideColor  string  `json:"side_color"`
-	Callsign   string  `json:"callsign"`
-	Role       string  `json:"role"`
-	MapPackURL *string `json:"map_pack_url,omitempty"`
+	GameID         string  `json:"game_id"`
+	GameName       string  `json:"game_name"`
+	SideID         string  `json:"side_id"`
+	SideName       string  `json:"side_name"`
+	SideColor      string  `json:"side_color"`
+	Callsign       string  `json:"callsign"`
+	Role           string  `json:"role"`
+	RespawnSeconds int     `json:"respawn_seconds"`
+	MapPackURL     *string `json:"map_pack_url,omitempty"`
 }
 
 func (h *GameHandler) Join(c *gin.Context) {
@@ -145,14 +148,15 @@ func (h *GameHandler) Join(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, joinResponse{
-		GameID:     res.Game.ID,
-		GameName:   res.Game.Name,
-		SideID:     res.Side.ID,
-		SideName:   res.Side.Name,
-		SideColor:  res.Side.Color,
-		Callsign:   res.Member.Callsign,
-		Role:       string(res.Member.Role),
-		MapPackURL: res.Game.MapPackURL,
+		GameID:         res.Game.ID,
+		GameName:       res.Game.Name,
+		SideID:         res.Side.ID,
+		SideName:       res.Side.Name,
+		SideColor:      res.Side.Color,
+		Callsign:       res.Member.Callsign,
+		Role:           string(res.Member.Role),
+		RespawnSeconds: res.Game.RespawnSeconds,
+		MapPackURL:     res.Game.MapPackURL,
 	})
 }
 

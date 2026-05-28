@@ -23,8 +23,9 @@
   - `POST /api/v1/games/:id/markers` — создать метку с серверной валидацией visibility (organizers-метку имеет право поставить только organizer), проверкой bbox игры (D1) и автоподстановкой side/squad автора; броадкаст в WS с фильтрацией по `MarkerService.CanSee`
   - `GET /api/v1/games/:id/markers` — список видимых текущему игроку (отфильтрованы истёкшие и недоступные по visibility)
   - `POST /api/v1/games/:id/spawn-points` — поставить точку возрождения (organizer-only, bbox-валидация); `GET` — список (любой член игры)
-  - `POST /api/v1/games/:id/kills` — игрок отметил себя убитым: status=dead, respawn_until=now+60с, event-запись, WS-broadcast `kill` союзникам, инвалидация member-кэша
+  - `POST /api/v1/games/:id/kills` — игрок отметил себя убитым: status=dead, respawn_until=now+`respawn_seconds`, event-запись (опц. клиентский `event_id` для идемпотентности с offline-outbox), WS-broadcast `kill` союзникам, инвалидация member-кэша
   - `POST /api/v1/games/:id/respawn` — снять статус мёртвого после таймера: status=alive, event, WS-broadcast `respawn`
+  - `POST /api/v1/games/:id/events/sync` — батч офлайн-событий из клиентского outbox; idempotent по `events.id` (ON CONFLICT DO NOTHING, эффект применяется только для впервые увиденных), сортировка по `occurred_at`, для kill/respawn применяет статус + broadcast; возвращает `accepted`
   - `GET /api/v1/ws?game=...` — WS-хаб с in-memory кэшем `game_members` (warm на connect, инвалидация на assignment-update и kill/respawn); правила: organizer видит всё, dead не получает позиций живых, position между членами одной стороны, marker — через CanSee, kill/respawn — союзникам
   - JWT-валидация (HS256) на всех защищённых эндпоинтах
 - **Mobile** (требует локально `flutter pub get` + `dart run build_runner build` + `supabase_config.dart` + Storage bucket `map-packs`):
@@ -41,12 +42,13 @@
   - `MarkersApi` — типизированные `MarkerKind` / `MarkerVisibility` + DTO; начальная загрузка через GET, далее обновления через WS
   - `EventsApi` — POST /kills, POST /respawn, GET/POST /spawn-points (типизированные DTO `KillResult` / `SpawnPointInfo`)
   - `TtsService` (`flutter_tts`, ru-RU): очередь с приоритетами `critical | tactical | info`, инициализация в `main` через `ProviderContainer`. На входящий WS-marker (от союзника) клиент формирует фразу `Новая метка: <тип>, <дистанция>, <кардинал>` (или без азимута, если своя позиция ещё не получена). На kill/respawn — `Союзник убит / возродился`. Свои события не озвучиваются
-  - Экран `/dead`: при входе POST /kills → `GpsService.markDead()` → подгрузка spawn-points → выбор ближайшего к моей стороне (или общего, side_id == null) → крутящаяся стрелка азимута (компас минус bearing), под ней дистанция + кардинал. Таймер обратного отсчёта из respawn_until сервера; при потере связи — локальный 60-секундный fallback с пометкой. По кнопке/таймеру → POST /respawn → `markAlive()` → `/battle`. Критические TTS-фразы прерывают очередь
+  - Экран `/dead`: при входе событие kill пишется в Drift-outbox (durable), затем POST /kills с тем же `event_id` → `GpsService.markDead()` → подгрузка spawn-points → выбор ближайшего к моей стороне (или общего, side_id == null) → крутящаяся стрелка азимута (компас минус bearing), под ней дистанция + кардинал. Таймер из respawn_until сервера; при потере связи — локальный fallback из `session.respawnSeconds` с пометкой «досинхроним позже». По кнопке/таймеру → respawn в outbox + POST /respawn → `markAlive()` → `/battle`. Критические TTS-фразы прерывают очередь
+  - Offline-first события: `EventSyncService` + Drift `EventsTable` (outbox, synced-флаг). kill/respawn пишутся локально с клиентским uuid и переживают отсутствие связи; `flush()` сливает батч на `/events/sync` после успешного online-действия и автоматически при восстановлении WS-связи (battle_map слушает `WsConnectionState.connected`). Сервер идемпотентен по uuid — двойного учёта нет даже если online-путь уже применил событие
   - `GameSession` (Riverpod) — единая доменная модель для soldier/organizer; `setMapPack` обновляет URL после upload
   - Лобби после join делает фоновый prefetch map-pack через `MapPackCache` (общий для lobby/battle_map/game_create — идемпотентный `ensure(gameId, url)`)
   - Командирский экран `/command`: tabs по сторонам (organizer видит все, side_commander — только свою), карточки отрядов как `DragTarget`, члены как `LongPressDraggable` chips с иконкой роли; tap → ModalBottomSheet с выбором новой роли; кнопка «+ Отряд»; auto-refresh после каждого изменения
 
-Открытые риски (Фаза 5): нет foreground-сервиса для GPS и shelf-сервера (C6/C7) — Android прибьёт WS/shelf при долгом backgrounding; нет батч-синхронизации событий при отсутствии связи (kill/respawn пока теряются, если сервер недоступен); таймер респауна (60с) хардкоден — фаза 5 вынесет в game.respawn_seconds; UI для постановки spawn-points (organizer кладёт их через POST, через UI пока нет — фаза 5 добавит long-press опцию «точка возрождения» рядом с метками).
+Открытые риски (Фаза 5, осталось): нет foreground-сервиса для GPS и shelf-сервера (C6/C7) — Android прибьёт WS/shelf при долгом backgrounding (нужен для hands-free); нет push (FCM) для зова на сбор/отбоя; деплой на Oracle Cloud и публикация в Google Play. Закрыто: конфигурируемый respawn_seconds, UI точек возрождения, офлайн-синхронизация событий (Drift-outbox + idempotent /events/sync).
 
 ---
 
@@ -360,8 +362,8 @@ airsoftmap/
 
 - [x] Конфигурируемое время респауна (game.respawn_seconds, слайдер в создании игры)
 - [x] UI постановки точек возрождения (organizer long-press → spawn) + отрисовка на карте
+- [x] Оффлайн-режим: батч-синхронизация событий (Drift-outbox + idempotent /events/sync + flush на reconnect)
 - [ ] Push (FCM) для зова на сбор / отбоя игры
-- [ ] Оффлайн-режим: батч-синхронизация событий
 - [ ] Foreground-service для GPS/WS/shelf (C6/C7) + hands-free
 - [ ] Темная тема для OLED
 - [ ] Деплой Go API на Oracle Cloud

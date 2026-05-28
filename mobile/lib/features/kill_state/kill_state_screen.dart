@@ -7,10 +7,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 
+import 'package:uuid/uuid.dart';
+
 import '../../core/api/events_api.dart';
 import '../../core/gps/geo.dart';
 import '../../core/gps/gps_provider.dart';
 import '../../core/session/game_session.dart';
+import '../../core/sync/event_sync_service.dart';
 import '../voice/tts_service.dart';
 
 /// Экран «Убит».
@@ -48,6 +51,10 @@ class _KillStateScreenState extends ConsumerState<KillStateScreen> {
   bool _killing = true;
   bool _respawning = false;
 
+  // Общий uuid события смерти: пишем в outbox и шлём тот же id на /kills,
+  // чтобы последующий sync не задвоил.
+  final _killEventId = const Uuid().v4();
+
   @override
   void initState() {
     super.initState();
@@ -70,30 +77,47 @@ class _KillStateScreenState extends ConsumerState<KillStateScreen> {
       return;
     }
     final tts = ref.read(ttsServiceProvider);
+    final now = DateTime.now();
+
+    // 0. Durable-запись смерти в outbox (переживёт оффлайн и краш).
+    await ref.read(eventSyncServiceProvider).enqueueKill(
+          gameId: session.gameId,
+          eventId: _killEventId,
+          occurredAt: now,
+        );
+
+    // Локальный фолбэк-таймер из настроек игры — на случай оффлайна.
+    final localUntil = now.add(Duration(seconds: session.respawnSeconds));
 
     try {
-      // 1. POST /kills — сервер выставит status=dead + respawn_until.
-      final res = await ref.read(eventsApiProvider).kill(session.gameId);
+      // 1. POST /kills с тем же event_id — сервер выставит status=dead +
+      //    respawn_until и сделает broadcast. Idempotent с outbox.
+      final res = await ref
+          .read(eventsApiProvider)
+          .kill(session.gameId, eventId: _killEventId);
+      // Событие доставлено онлайн — снимаем из очереди sync.
+      await ref.read(eventSyncServiceProvider).flush(session.gameId);
       if (mounted) {
         setState(() {
           _respawnUntil = res.respawnUntil;
           _killing = false;
         });
       }
-      tts.enqueue(
-        VoiceMessage('Убит. Двигайся к мертвяку.', VoicePriority.critical),
-      );
     } catch (e) {
-      // Сервер может быть недоступен (нет связи в лесу) — переходим в локальный
-      // режим: таймер 60с от текущего момента, статус храним только локально.
+      // Сервер недоступен (нет связи в лесу) — локальный таймер, событие
+      // уже в outbox и уйдёт при следующем flush (на reconnect).
       if (mounted) {
         setState(() {
-          _respawnUntil = DateTime.now().add(const Duration(seconds: 60));
+          _respawnUntil = localUntil;
           _killing = false;
-          _error = 'Нет связи: статус локальный';
+          _error = 'Нет связи: статус локальный, досинхроним позже';
         });
       }
     }
+
+    tts.enqueue(
+      VoiceMessage('Убит. Двигайся к мертвяку.', VoicePriority.critical),
+    );
 
     await ref.read(gpsServiceProvider).markDead();
 
@@ -169,11 +193,23 @@ class _KillStateScreenState extends ConsumerState<KillStateScreen> {
     if (session == null) return;
     setState(() => _respawning = true);
 
+    final respawnEventId = const Uuid().v4();
+    final now = DateTime.now();
+
+    // Durable-запись возрождения в outbox.
+    await ref.read(eventSyncServiceProvider).enqueueRespawn(
+          gameId: session.gameId,
+          eventId: respawnEventId,
+          occurredAt: now,
+        );
+
     try {
-      await ref.read(eventsApiProvider).respawn(session.gameId);
+      await ref
+          .read(eventsApiProvider)
+          .respawn(session.gameId, eventId: respawnEventId);
+      await ref.read(eventSyncServiceProvider).flush(session.gameId);
     } catch (_) {
-      // Нет связи — переход в бой всё равно делаем (сервер досинхронит позже
-      // через положение и события из батча — фаза 5).
+      // Нет связи — событие в outbox, уйдёт при reconnect. В бой идём сразу.
     }
     await ref.read(gpsServiceProvider).markAlive();
     ref.read(ttsServiceProvider).enqueue(

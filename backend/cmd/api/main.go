@@ -92,6 +92,7 @@ func main() {
 		priv.GET("/games/:id/spawn-points", spawnH.List)
 		priv.POST("/games/:id/kills", eventH.Kill)
 		priv.POST("/games/:id/respawn", eventH.Respawn)
+		priv.POST("/games/:id/events/sync", eventH.Sync)
 		priv.GET("/ws", wsH.Connect)
 	}
 

@@ -12,6 +12,7 @@ class JoinResult {
   final String sideColor;
   final String callsign;
   final String role;
+  final int respawnSeconds;
   final String? mapPackUrl;
 
   const JoinResult({
@@ -22,6 +23,7 @@ class JoinResult {
     required this.sideColor,
     required this.callsign,
     required this.role,
+    this.respawnSeconds = 60,
     this.mapPackUrl,
   });
 
@@ -33,6 +35,7 @@ class JoinResult {
         sideColor: j['side_color'] as String,
         callsign: j['callsign'] as String,
         role: j['role'] as String,
+        respawnSeconds: (j['respawn_seconds'] as num?)?.toInt() ?? 60,
         mapPackUrl: j['map_pack_url'] as String?,
       );
 }
@@ -63,6 +66,7 @@ class CreatedGame {
   final String name;
   final String joinCode;
   final String status;
+  final int respawnSeconds;
   final List<CreatedSide> sides;
   const CreatedGame({
     required this.id,
@@ -70,12 +74,14 @@ class CreatedGame {
     required this.joinCode,
     required this.status,
     required this.sides,
+    this.respawnSeconds = 60,
   });
   factory CreatedGame.fromJson(Map<String, dynamic> j) => CreatedGame(
         id: j['id'] as String,
         name: j['name'] as String,
         joinCode: j['join_code'] as String,
         status: j['status'] as String,
+        respawnSeconds: (j['respawn_seconds'] as num?)?.toInt() ?? 60,
         sides: (j['sides'] as List)
             .map((e) => CreatedSide.fromJson(e as Map<String, dynamic>))
             .toList(growable: false),

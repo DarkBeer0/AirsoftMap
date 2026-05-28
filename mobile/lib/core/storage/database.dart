@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -57,6 +58,45 @@ class AppDatabase extends _$AppDatabase {
 
   @override
   int get schemaVersion => 1;
+
+  // ─── Outbox событий (offline-first) ──────────────────────────────────────
+
+  /// Положить событие в outbox (synced=false). Идемпотентно по id —
+  /// повторный enqueue того же uuid не плодит дубли.
+  Future<void> enqueueEvent({
+    required String id,
+    required String gameId,
+    required String type,
+    required DateTime occurredAt,
+    String? payload,
+  }) {
+    return into(eventsTable).insert(
+      EventsTableCompanion.insert(
+        id: id,
+        gameId: gameId,
+        type: type,
+        occurredAt: occurredAt,
+        payload: Value(payload),
+        synced: const Value(false),
+      ),
+      mode: InsertMode.insertOrIgnore,
+    );
+  }
+
+  /// Несинхронизированные события игры, в порядке occurred_at.
+  Future<List<EventsTableData>> pendingEvents(String gameId) {
+    return (select(eventsTable)
+          ..where((t) => t.gameId.equals(gameId) & t.synced.equals(false))
+          ..orderBy([(t) => OrderingTerm.asc(t.occurredAt)]))
+        .get();
+  }
+
+  /// Пометить события синхронизированными после успешного POST /events/sync.
+  Future<void> markSynced(List<String> ids) {
+    if (ids.isEmpty) return Future.value();
+    return (update(eventsTable)..where((t) => t.id.isIn(ids)))
+        .write(const EventsTableCompanion(synced: Value(true)));
+  }
 }
 
 LazyDatabase _open() {
@@ -66,3 +106,10 @@ LazyDatabase _open() {
     return NativeDatabase.createInBackground(file);
   });
 }
+
+/// Единый экземпляр БД на приложение.
+final appDatabaseProvider = Provider<AppDatabase>((ref) {
+  final db = AppDatabase();
+  ref.onDispose(db.close);
+  return db;
+});

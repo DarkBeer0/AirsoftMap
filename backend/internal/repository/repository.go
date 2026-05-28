@@ -323,12 +323,29 @@ type EventsRepo struct{ db *sqlx.DB }
 
 func NewEventsRepo(db *sqlx.DB) *EventsRepo { return &EventsRepo{db: db} }
 
+func (r *EventsRepo) DB() *sqlx.DB { return r.db }
+
 // Insert идемпотентный — id генерится клиентом, дубли игнорируем.
 func (r *EventsRepo) Insert(q Querier, e *model.Event) error {
-	_, err := q.NamedExec(`
+	_, err := r.InsertIfNew(q, e)
+	return err
+}
+
+// InsertIfNew возвращает true, если строка реально вставлена (а не отброшена
+// по ON CONFLICT). Нужно для идемпотентного применения эффектов: повторный
+// sync того же события не должен заново менять статус/слать broadcast.
+func (r *EventsRepo) InsertIfNew(q Querier, e *model.Event) (bool, error) {
+	res, err := q.NamedExec(`
 		INSERT INTO events (id, game_id, user_id, type, payload, occurred_at)
 		VALUES (:id, :game_id, :user_id, :type, :payload, :occurred_at)
 		ON CONFLICT (id) DO NOTHING
 	`, e)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }

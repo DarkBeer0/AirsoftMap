@@ -18,6 +18,9 @@ class GameSession {
 
   final String? mapPackUrl;
 
+  /// Таймер респауна из настроек игры (для оффлайн-фолбэка на экране мертвяка).
+  final int respawnSeconds;
+
   const GameSession({
     required this.gameId,
     required this.gameName,
@@ -27,6 +30,7 @@ class GameSession {
     this.sideName,
     this.sideColor,
     this.mapPackUrl,
+    this.respawnSeconds = 60,
   });
 
   bool get isOrganizer => role == 'organizer';
@@ -41,6 +45,7 @@ class GameSession {
         sideName: r.sideName,
         sideColor: r.sideColor,
         mapPackUrl: r.mapPackUrl,
+        respawnSeconds: r.respawnSeconds,
       );
 
   factory GameSession.forOrganizer(CreatedGame g) => GameSession(
@@ -48,6 +53,7 @@ class GameSession {
         gameName: g.name,
         callsign: 'Organizer',
         role: 'organizer',
+        respawnSeconds: g.respawnSeconds,
       );
 }
 
@@ -74,6 +80,7 @@ class GameSessionNotifier extends Notifier<GameSession?> {
       sideName: cur.sideName,
       sideColor: cur.sideColor,
       mapPackUrl: url,
+      respawnSeconds: cur.respawnSeconds,
     );
   }
 

@@ -19,6 +19,7 @@ import '../../core/gps/motion_service.dart';
 import '../../core/map/map_pack_cache.dart';
 import '../../core/map/mbtiles_server.dart';
 import '../../core/session/game_session.dart';
+import '../../core/sync/event_sync_service.dart';
 import '../../core/ws/ws_service.dart';
 import '../voice/tts_service.dart';
 
@@ -132,6 +133,10 @@ class _BattleMapScreenState extends ConsumerState<BattleMapScreen> {
     final ws = ref.read(wsServiceProvider);
     _wsStateSub = ws.state.listen((s) {
       if (mounted) setState(() => _wsState = s);
+      // Восстановили связь — сливаем накопленный offline-outbox (kill/respawn).
+      if (s == WsConnectionState.connected) {
+        ref.read(eventSyncServiceProvider).flush(session.gameId);
+      }
     });
     _wsSub = ws.incoming.listen(_onWsPacket);
     try {

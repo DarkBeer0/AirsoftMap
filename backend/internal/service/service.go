@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -823,7 +824,11 @@ type KillResult struct {
 // Kill — игрок сам помечает себя убитым (нажал «УБИТ» на боевой карте).
 // Сценарий «организатор оживляет вручную» — отдельный путь, не здесь.
 // Возвращает обновлённого члена и время, до которого экран мертвяка тикает.
-func (s *EventService) Kill(ctx context.Context, userID, gameID string) (*KillResult, error) {
+//
+// eventID опционален: если клиент сгенерил uuid и положил его в локальный
+// outbox, передаёт тот же id сюда — тогда последующий /events/sync того же
+// события будет no-op (идемпотентность по events.id), без двойного учёта.
+func (s *EventService) Kill(ctx context.Context, userID, gameID, eventID string) (*KillResult, error) {
 	if userID == "" || gameID == "" {
 		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
 	}
@@ -843,9 +848,12 @@ func (s *EventService) Kill(ctx context.Context, userID, gameID string) (*KillRe
 	if err := s.members.UpdateStatusAndRespawn(db, m.ID, string(model.MemberStatusDead), &respawnUntil); err != nil {
 		return nil, err
 	}
+	if eventID == "" {
+		eventID = uuid.NewString()
+	}
 	// Записываем событие — для отчёта после игры (kill-feed, статистика).
 	_ = s.events.Insert(db, &model.Event{
-		ID:         uuid.NewString(),
+		ID:         eventID,
 		GameID:     gameID,
 		UserID:     userID,
 		Type:       "kill",
@@ -859,7 +867,7 @@ func (s *EventService) Kill(ctx context.Context, userID, gameID string) (*KillRe
 // Respawn — игрок отметил, что добрался до мертвяка / таймер истёк.
 // Клиент может вызвать раньше respawn_until (например, организатор сказал
 // «возвращайся сразу») — это допустимо, статус считается на стороне организатора.
-func (s *EventService) Respawn(ctx context.Context, userID, gameID string) (*model.GameMember, error) {
+func (s *EventService) Respawn(ctx context.Context, userID, gameID, eventID string) (*model.GameMember, error) {
 	if userID == "" || gameID == "" {
 		return nil, fmt.Errorf("%w: missing ids", ErrValidation)
 	}
@@ -874,8 +882,11 @@ func (s *EventService) Respawn(ctx context.Context, userID, gameID string) (*mod
 	if err := s.members.UpdateStatusAndRespawn(db, m.ID, string(model.MemberStatusAlive), nil); err != nil {
 		return nil, err
 	}
+	if eventID == "" {
+		eventID = uuid.NewString()
+	}
 	_ = s.events.Insert(db, &model.Event{
-		ID:         uuid.NewString(),
+		ID:         eventID,
 		GameID:     gameID,
 		UserID:     userID,
 		Type:       "respawn",
@@ -884,4 +895,93 @@ func (s *EventService) Respawn(ctx context.Context, userID, gameID string) (*mod
 	m.Status = model.MemberStatusAlive
 	m.RespawnUntil = nil
 	return m, nil
+}
+
+// ─── Batch sync (offline-first) ─────────────────────────────────────────────
+
+type SyncEventInput struct {
+	ID         string
+	Type       string
+	OccurredAt time.Time
+	Payload    *string
+}
+
+// SyncEffect — что изменилось в результате применения события. Хендлер
+// использует это для WS-broadcast и инвалидации кэша членства.
+type SyncEffect struct {
+	Type         string // kill | respawn
+	Member       model.GameMember
+	RespawnUntil *time.Time
+}
+
+// SyncBatch применяет батч офлайн-событий игрока идемпотентно. Эффекты
+// (смена статуса) применяются только для впервые увиденных событий —
+// повтор того же id ничего не делает. События обрабатываются в порядке
+// occurred_at, поэтому финальный статус соответствует последнему событию.
+func (s *EventService) SyncBatch(
+	ctx context.Context, userID, gameID string, in []SyncEventInput,
+) (effects []SyncEffect, accepted int, err error) {
+	if userID == "" || gameID == "" {
+		return nil, 0, fmt.Errorf("%w: missing ids", ErrValidation)
+	}
+	db := s.members.DB()
+	member, err := s.members.ByUserAndGame(db, userID, gameID)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			return nil, 0, ErrForbidden
+		}
+		return nil, 0, err
+	}
+
+	secs := DefaultRespawnSeconds
+	if g, gerr := s.games.ByID(db, gameID); gerr == nil && g.RespawnSeconds > 0 {
+		secs = g.RespawnSeconds
+	}
+
+	// Сортируем по времени события — статус должен «прийти» в правильном порядке.
+	sorted := make([]SyncEventInput, len(in))
+	copy(sorted, in)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		return sorted[i].OccurredAt.Before(sorted[j].OccurredAt)
+	})
+
+	for _, e := range sorted {
+		if e.ID == "" {
+			continue
+		}
+		inserted, ierr := s.events.InsertIfNew(db, &model.Event{
+			ID:         e.ID,
+			GameID:     gameID,
+			UserID:     userID,
+			Type:       e.Type,
+			Payload:    e.Payload,
+			OccurredAt: e.OccurredAt,
+		})
+		if ierr != nil {
+			return effects, accepted, ierr
+		}
+		if !inserted {
+			continue // уже видели — идемпотентность
+		}
+		accepted++
+
+		switch e.Type {
+		case "kill":
+			ru := e.OccurredAt.Add(time.Duration(secs) * time.Second)
+			_ = s.members.UpdateStatusAndRespawn(db, member.ID, string(model.MemberStatusDead), &ru)
+			m := *member
+			m.Status = model.MemberStatusDead
+			m.RespawnUntil = &ru
+			effects = append(effects, SyncEffect{Type: "kill", Member: m, RespawnUntil: &ru})
+		case "respawn":
+			_ = s.members.UpdateStatusAndRespawn(db, member.ID, string(model.MemberStatusAlive), nil)
+			m := *member
+			m.Status = model.MemberStatusAlive
+			m.RespawnUntil = nil
+			effects = append(effects, SyncEffect{Type: "respawn", Member: m})
+		default:
+			// objective_capture и прочее — пишем в журнал, без эффекта на статус.
+		}
+	}
+	return effects, accepted, nil
 }
