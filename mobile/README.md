@@ -2,14 +2,14 @@
 
 ## Bootstrap
 
-Платформенные папки (`android/`, `ios/`, ...) пока не созданы — их генерирует `flutter create`. Из директории `mobile/`:
+Платформенные папки (`android/`, `ios/`, `web/`, ...) уже в репозитории. Из директории `mobile/`:
 
 ```bash
-flutter create --org com.airsoftmap --project-name airsoftmap .
 flutter pub get
+dart run build_runner build --delete-conflicting-outputs  # сгенерит database.g.dart
 ```
 
-Это сгенерирует нативные обёртки, не трогая существующие `lib/`, `pubspec.yaml`, `analysis_options.yaml`.
+`database.g.dart` в `.gitignore` — генерируется локально (см. «Кодген» ниже).
 
 ## Конфиг
 
